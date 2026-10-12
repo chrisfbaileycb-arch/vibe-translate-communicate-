@@ -131,50 +131,87 @@ export class RemoteLLMEngine implements TranslatorEngine {
   }
 
   async translate(text: string, current: IntentModel | null, selection: string | null, target?: TargetId): Promise<ParseResult> {
-    const endpoint = (this.config.endpoint ?? '').trim().replace(/\/$/, '');
-    if (!endpoint || !this.config.apiKey) {
-      throw new Error('The AI engine needs a key — unlock the key vault in the sidebar first. Your key, your bill.');
-    }
-
     const wantsWorkflow = isWorkflowTarget(target) || Boolean(current?.workflow);
-    const huggingFace = isHuggingFaceEndpoint(endpoint);
-    const response = await fetch(`${endpoint}/chat/completions`, {
-      method: 'POST',
-      headers: chatHeaders(endpoint, this.config.apiKey),
-      body: JSON.stringify({
-        model: this.config.model || (huggingFace ? 'Qwen/Qwen2.5-Coder-32B-Instruct' : 'gpt-4o-mini'),
-        temperature: 0,
-        ...(huggingFace ? { max_tokens: 2048 } : { response_format: { type: 'json_object' } }),
-        messages: [
-          { role: 'system', content: wantsWorkflow ? WORKFLOW_PROMPT : SYSTEM_PROMPT },
-          {
-            role: 'user',
-            content: JSON.stringify({
-              utterance: text,
-              selection,
-              existingModel: current
-                ? { kind: current.kind, label: current.label, props: current.props, workflow: current.workflow }
-                : null,
-            }),
-          },
-        ],
-      }),
-    });
 
-    if (!response.ok) {
-      let detail = '';
-      try {
-        const body = (await response.json()) as { error?: string | { message?: string } };
-        detail = typeof body.error === 'string' ? body.error : (body.error?.message ?? '');
-      } catch {
-        /* non-JSON error body */
-      }
-      const hint =
-        response.status === 401 && huggingFace ? ' — check the token is an hf_ token with Read (or Inference) permission.' : '';
-      throw new Error(`AI endpoint returned ${response.status}${detail ? `: ${detail}` : ''}${hint}`);
+    // Call backend proxy route: the API key is handled strictly in backend memory
+    // and is never exposed in browser storage or network scraping
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+    };
+    if (this.config.sessionId) {
+      headers['x-session-id'] = this.config.sessionId;
     }
-    const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
-    const raw = data.choices?.[0]?.message?.content ?? '{}';
+
+    let raw = '{}';
+    let provider = 'backend';
+
+    try {
+      const serverRes = await fetch('/api/translate', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          text,
+          current,
+          selection,
+          target,
+          endpoint: this.config.endpoint,
+          model: this.config.model,
+          ...(this.config.apiKey ? { apiKey: this.config.apiKey } : {}),
+        }),
+      });
+
+      if (!serverRes.ok) {
+        let errMessage = `Backend translation error (${serverRes.status})`;
+        try {
+          const errBody = await serverRes.json();
+          if (errBody.error) errMessage = errBody.error;
+        } catch {
+          /* non-json */
+        }
+        throw new Error(errMessage);
+      }
+
+      const serverData = (await serverRes.json()) as { raw?: string; provider?: string };
+      raw = serverData.raw ?? '{}';
+      provider = serverData.provider || 'backend';
+    } catch (serverErr) {
+      // Fallback for offline client with explicit key only
+      const endpoint = (this.config.endpoint ?? '').trim().replace(/\/$/, '');
+      if (this.config.apiKey && endpoint) {
+        const huggingFace = isHuggingFaceEndpoint(endpoint);
+        const response = await fetch(`${endpoint}/chat/completions`, {
+          method: 'POST',
+          headers: chatHeaders(endpoint, this.config.apiKey),
+          body: JSON.stringify({
+            model: this.config.model || (huggingFace ? 'Qwen/Qwen2.5-Coder-32B-Instruct' : 'gpt-4o-mini'),
+            temperature: 0,
+            ...(huggingFace ? { max_tokens: 2048 } : { response_format: { type: 'json_object' } }),
+            messages: [
+              { role: 'system', content: wantsWorkflow ? WORKFLOW_PROMPT : SYSTEM_PROMPT },
+              {
+                role: 'user',
+                content: JSON.stringify({
+                  utterance: text,
+                  selection,
+                  existingModel: current
+                    ? { kind: current.kind, label: current.label, props: current.props, workflow: current.workflow }
+                    : null,
+                }),
+              },
+            ],
+          }),
+        });
+
+        if (!response.ok) {
+          throw serverErr;
+        }
+        const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
+        raw = data.choices?.[0]?.message?.content ?? '{}';
+        provider = 'client-fallback';
+      } else {
+        throw serverErr;
+      }
+    }
 
     if (wantsWorkflow) {
       const payload = extractJson(raw) as { label?: string; nodes?: Partial<WorkflowNode>[]; edges?: Partial<WorkflowEdge>[]; notes?: string[] };
@@ -224,7 +261,7 @@ export class RemoteLLMEngine implements TranslatorEngine {
     return {
       model: base,
       selection: null,
-      message: `AI engine produced ${base.props.length} properties. Constraints re-checked locally.`,
+      message: `AI engine produced ${base.props.length} properties via ${provider}. Constraints re-checked locally.`,
       changedKeys: base.props.map((p) => p.key),
     };
   }

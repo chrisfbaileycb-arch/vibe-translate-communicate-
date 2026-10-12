@@ -275,6 +275,68 @@ body {
   font-size: 11px; padding: 2px 8px; border-radius: 999px;
   background: rgba(56, 189, 248, 0.12); color: var(--accent);
 }
+.vault-security-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: 9px;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  color: var(--text);
+  line-height: 1.5;
+}
+.vault-security-banner.active {
+  background: rgba(56, 189, 248, 0.08);
+  border-color: rgba(56, 189, 248, 0.3);
+}
+.vault-shield-icon {
+  font-size: 16px;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.vault-security-banner strong {
+  display: block;
+  font-size: 12px;
+  color: var(--good);
+  margin-bottom: 2px;
+}
+.vault-security-banner.active strong {
+  color: var(--accent);
+}
+.vault-security-banner p {
+  margin: 0;
+  color: var(--muted);
+}
+.vault-key-input-wrapper {
+  display: flex;
+  align-items: center;
+  position: relative;
+  width: 100%;
+}
+.vault-key-input-wrapper input {
+  width: 100%;
+  padding-right: 56px;
+}
+.vault-eye-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.vault-eye-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
 .vault-notice { font-size: 11.5px; color: var(--good); margin: 10px 2px 0; line-height: 1.6; }
 .ghost.danger { color: var(--error); border-color: rgba(248, 113, 113, 0.35); }
 .ghost.danger:hover { border-color: var(--error); color: var(--error); }

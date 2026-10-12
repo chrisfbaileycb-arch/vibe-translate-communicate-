@@ -12,6 +12,8 @@ import type { UsageStats, VaultSecret } from './lib/vault.ts';
 import {
   bumpUsage,
   clearSessionSecret,
+  fetchServerVaultStatus,
+  getServerSessionId,
   loadSessionSecret,
   loadUsage,
   purgeAllKeys,
@@ -212,6 +214,8 @@ export default function App() {
   // Session vs Vault API key
   const [vaultSecret, setVaultSecret] = useState<VaultSecret | null>(loadSessionSecret);
   const [isSessionOnly, setIsSessionOnly] = useState<boolean>(() => loadSessionSecret() !== null);
+  const [backendSessionId, setBackendSessionId] = useState<string | null>(getServerSessionId);
+  const [serverMaskedKey, setServerMaskedKey] = useState<string | null>(null);
   const [usage, setUsage] = useState<UsageStats>(loadUsage);
   const autoLockRef = useRef<number | null>(null);
 
@@ -230,6 +234,30 @@ export default function App() {
     };
     setLog((entries) => [item, ...entries].slice(0, 16));
   }, []);
+
+  // 0. Check for active backend in-memory session
+  useEffect(() => {
+    let mounted = true;
+    fetchServerVaultStatus().then((status) => {
+      if (!mounted) return;
+      if (status.hasSessionKey && status.maskedKey) {
+        setServerMaskedKey(status.maskedKey);
+        setIsSessionOnly(true);
+        setVaultSecret({ apiKey: '', endpoint: status.endpoint, model: status.model });
+        setEngineConfig((prev) => ({
+          ...prev,
+          id: 'remote',
+          endpoint: status.endpoint,
+          model: status.model,
+          sessionId: getServerSessionId() || undefined,
+        }));
+        pushLog('Backend in-memory session active (zero browser storage).');
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [pushLog]);
 
   // 1. Initial Firestore connection test
   useEffect(() => {
@@ -312,7 +340,11 @@ export default function App() {
       setBusy(true);
       try {
         const isRemote = engineConfig.id === 'remote';
-        const engine = createEngine({ ...engineConfig, apiKey: vaultSecret?.apiKey });
+        const engine = createEngine({
+          ...engineConfig,
+          apiKey: vaultSecret?.apiKey,
+          sessionId: backendSessionId || getServerSessionId() || undefined,
+        });
         const result = await engine.translate(clean, model, selection, target);
         setHistory((h) => (model ? [...h, model] : h).slice(-40));
         setModel(result.model);
@@ -332,7 +364,7 @@ export default function App() {
         setBusy(false);
       }
     },
-    [engineConfig, model, selection, target, pushLog, undo, vaultSecret, armAutoLock],
+    [engineConfig, model, selection, target, pushLog, undo, vaultSecret, backendSessionId, armAutoLock],
   );
 
   const speech = useSpeech((text, isFinal) => {
@@ -709,16 +741,31 @@ export default function App() {
           <VaultPanel
             secret={vaultSecret}
             isSessionOnly={isSessionOnly}
-            onUnlock={(next, sessionOnly) => {
+            serverMaskedKey={serverMaskedKey}
+            onUnlock={(next, sessionOnly, sessionId) => {
               setVaultSecret(next);
               setIsSessionOnly(!!sessionOnly);
-              saveEngineConfig({ id: 'remote', endpoint: next.endpoint, model: next.model });
+              if (sessionId) {
+                setBackendSessionId(sessionId);
+              }
+              if (sessionOnly) {
+                setServerMaskedKey('•••••••• (Backend Secured)');
+              } else {
+                setServerMaskedKey(null);
+              }
+              saveEngineConfig({
+                id: 'remote',
+                endpoint: next.endpoint,
+                model: next.model,
+                sessionId: sessionId || backendSessionId || undefined,
+              });
               armAutoLock();
-              pushLog(sessionOnly ? 'Session API key activated.' : 'Encrypted vault unlocked.');
+              pushLog(sessionOnly ? 'Backend in-memory API key activated (immune to scraping).' : 'Encrypted vault unlocked.');
             }}
             onLock={() => {
               setVaultSecret(null);
               setIsSessionOnly(false);
+              setServerMaskedKey(null);
               clearSessionSecret();
               saveEngineConfig({ id: 'local' });
               pushLog('Session locked — API key removed from memory.');
@@ -726,9 +773,11 @@ export default function App() {
             onForget={() => {
               setVaultSecret(null);
               setIsSessionOnly(false);
+              setServerMaskedKey(null);
+              setBackendSessionId(null);
               purgeAllKeys();
               saveEngineConfig({ id: 'local' });
-              pushLog('API key and vaults purged immediately.');
+              pushLog('API key deleted from backend RAM. Zero keys active.');
             }}
             onUsageChange={setUsage}
           />

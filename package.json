@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Voice-to-code translator with a semantic layer, live visual verification and two-way code<->preview binding.",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 3000",
+    "dev": "tsx server.ts",
+    "start": "node server.ts",
     "lint": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "build:extension": "tsc --noEmit -p extension && node scripts/build-extension.mjs",
@@ -14,14 +15,18 @@
     "test": "node --experimental-strip-types src/lib/smoke.test.ts && node --experimental-strip-types src/lib/vault.test.ts"
   },
   "dependencies": {
+    "@google/genai": "^2.28.0",
+    "express": "^5.3.0",
     "firebase": "^13.0.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
   }

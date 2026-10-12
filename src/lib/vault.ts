@@ -195,24 +195,94 @@ export function hasVault(): boolean {
   return loadVault() !== null;
 }
 
-export function saveSessionSecret(secret: VaultSecret): void {
+let inMemorySessionSecret: VaultSecret | null = null;
+let ephemeralServerSessionId: string | null = null;
+
+export function getServerSessionId(): string | null {
+  return ephemeralServerSessionId;
+}
+
+export function setServerSessionId(id: string | null): void {
+  ephemeralServerSessionId = id;
+}
+
+export interface ServerVaultStatus {
+  hasServerDefaultKey: boolean;
+  hasSessionKey: boolean;
+  endpoint: string;
+  model: string;
+  maskedKey: string | null;
+}
+
+export async function fetchServerVaultStatus(sessionId?: string | null): Promise<ServerVaultStatus> {
   try {
-    sessionStorage.setItem(SESSION_VAULT_KEY, JSON.stringify(secret));
+    const sid = sessionId || ephemeralServerSessionId;
+    const res = await fetch('/api/vault/status', {
+      headers: sid ? { 'x-session-id': sid } : {},
+    });
+    if (res.ok) {
+      return (await res.json()) as ServerVaultStatus;
+    }
   } catch {
-    /* ignore session storage restrictions */
+    /* server not reachable */
   }
+  return { hasServerDefaultKey: false, hasSessionKey: false, endpoint: '', model: '', maskedKey: null };
+}
+
+export async function saveKeyToServerSession(secret: VaultSecret): Promise<{ sessionId: string; maskedKey: string }> {
+  // Never save in browser localStorage or sessionStorage
+  const res = await fetch('/api/vault/session', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(ephemeralServerSessionId ? { 'x-session-id': ephemeralServerSessionId } : {}),
+    },
+    body: JSON.stringify(secret),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Failed to register key with backend (${res.status})`);
+  }
+  const data = (await res.json()) as { sessionId: string; maskedKey: string };
+  ephemeralServerSessionId = data.sessionId;
+  // Key is strictly in backend RAM: client memory does not hold the plaintext apiKey
+  inMemorySessionSecret = {
+    apiKey: '',
+    endpoint: secret.endpoint,
+    model: secret.model,
+  };
+  return data;
+}
+
+export async function clearKeyFromServerSession(): Promise<void> {
+  inMemorySessionSecret = null;
+  if (ephemeralServerSessionId) {
+    try {
+      await fetch('/api/vault/clear', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-session-id': ephemeralServerSessionId,
+        },
+      });
+    } catch {
+      /* ignore */
+    }
+    ephemeralServerSessionId = null;
+  }
+}
+
+/** In-memory only: does NOT store in localStorage or sessionStorage to prevent scraping */
+export function saveSessionSecret(secret: VaultSecret): void {
+  inMemorySessionSecret = secret;
 }
 
 export function loadSessionSecret(): VaultSecret | null {
-  try {
-    const raw = sessionStorage.getItem(SESSION_VAULT_KEY);
-    return raw ? (JSON.parse(raw) as VaultSecret) : null;
-  } catch {
-    return null;
-  }
+  return inMemorySessionSecret;
 }
 
 export function clearSessionSecret(): void {
+  inMemorySessionSecret = null;
   try {
     sessionStorage.removeItem(SESSION_VAULT_KEY);
   } catch {
@@ -223,6 +293,7 @@ export function clearSessionSecret(): void {
 export function purgeAllKeys(): void {
   clearSessionSecret();
   clearVault();
+  void clearKeyFromServerSession();
 }
 
 /** Portable encrypted vault file — safe to hand to someone; useless without the passphrase. */

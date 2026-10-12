@@ -1,6 +1,7 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import type { UsageStats, VaultBlob, VaultSecret } from '../lib/vault.ts';
 import {
+  clearKeyFromServerSession,
   clearSessionSecret,
   clearVault,
   decryptSecret,
@@ -8,6 +9,8 @@ import {
   keyPrefixWarning,
   encryptSecret,
   estimateTokens,
+  fetchServerVaultStatus,
+  getServerSessionId,
   loadVault,
   loadUsage,
   maskKey,
@@ -16,7 +19,7 @@ import {
   PROVIDER_PRESETS,
   purgeAllKeys,
   resetUsage,
-  saveSessionSecret,
+  saveKeyToServerSession,
   saveVault,
   serializeVault,
 } from '../lib/vault.ts';
@@ -25,7 +28,8 @@ import type { ProviderPreset } from '../lib/types.ts';
 interface VaultPanelProps {
   secret: VaultSecret | null;
   isSessionOnly: boolean;
-  onUnlock: (secret: VaultSecret, sessionOnly?: boolean) => void;
+  serverMaskedKey?: string | null;
+  onUnlock: (secret: VaultSecret, sessionOnly?: boolean, sessionId?: string) => void;
   onLock: () => void;
   onForget: () => void;
   onUsageChange: (usage: UsageStats) => void;
@@ -35,7 +39,7 @@ interface VaultPanelProps {
 function TokenOnramp({ preset }: { preset: ProviderPreset }) {
   if (!preset.tokenUrl) return null;
   const tip =
-    "Select 'Read' permissions when creating your token. Your token stays client-side in session memory or encrypted local storage.";
+    "Select 'Read' permissions when creating your token. Your token is transferred to backend memory only and never saved to browser storage.";
   return (
     <div className="onramp">
       <a className="onramp-link" href={preset.tokenUrl} target="_blank" rel="noopener noreferrer">
@@ -52,6 +56,7 @@ function TokenOnramp({ preset }: { preset: ProviderPreset }) {
 export default function VaultPanel({
   secret,
   isSessionOnly,
+  serverMaskedKey,
   onUnlock,
   onLock,
   onForget,
@@ -65,8 +70,10 @@ export default function VaultPanel({
 
   // Direct inputs — presets only prefill these, they never lock them.
   const [apiKey, setApiKey] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [endpoint, setEndpoint] = useState(PROVIDER_PRESETS[0].endpoint);
   const [model, setModel] = useState(PROVIDER_PRESETS[0].defaultModel);
+  const [serverMasked, setServerMasked] = useState<string | null>(serverMaskedKey ?? null);
 
   // Vault passphrase states
   const [pass, setPass] = useState('');
@@ -78,6 +85,22 @@ export default function VaultPanel({
   void revision;
   const stored: VaultBlob | null = loadVault();
   const usage = loadUsage();
+
+  useEffect(() => {
+    if (serverMaskedKey) {
+      setServerMasked(serverMaskedKey);
+    } else {
+      // Check server status in case page was reloaded with active backend session
+      const sid = getServerSessionId();
+      if (sid) {
+        fetchServerVaultStatus(sid).then((status) => {
+          if (status.hasSessionKey && status.maskedKey) {
+            setServerMasked(status.maskedKey);
+          }
+        });
+      }
+    }
+  }, [serverMaskedKey]);
 
   const flash = (message: string): void => {
     setNotice(message);
@@ -123,20 +146,30 @@ export default function VaultPanel({
       </div>
       {activePreset?.tokenUrl ? <TokenOnramp preset={activePreset} /> : null}
       <label className="vault-input-label">
-        API Key
-        <input
-          type="password"
-          placeholder="sk-or-…, sk-…, AIza…, hf_… — any OpenAI-compatible key"
-          autoComplete="off"
-          spellCheck={false}
-          value={apiKey}
-          onChange={(e) => handleKeyChange(e.target.value)}
-        />
+        <span>API Key (Backend Memory Input)</span>
+        <div className="vault-key-input-wrapper">
+          <input
+            type={showPassword ? 'text' : 'password'}
+            placeholder="sk-or-…, sk-…, AIza…, hf_… — your personal API key"
+            autoComplete="off"
+            spellCheck={false}
+            value={apiKey}
+            onChange={(e) => handleKeyChange(e.target.value)}
+          />
+          <button
+            type="button"
+            className="vault-eye-btn"
+            onClick={() => setShowPassword((v) => !v)}
+            title={showPassword ? 'Hide key' : 'Show key'}
+          >
+            {showPassword ? 'Hide' : 'Show'}
+          </button>
+        </div>
       </label>
       {keyWarning ? <p className="hint key-warning">{keyWarning}</p> : null}
       <div className="vault-grid-2">
         <label className="vault-input-label">
-          Base Endpoint URL
+          <span>Base Endpoint URL</span>
           <input
             type="text"
             placeholder="https://openrouter.ai/api/v1"
@@ -146,7 +179,7 @@ export default function VaultPanel({
           />
         </label>
         <label className="vault-input-label">
-          Model Identifier
+          <span>Model Identifier</span>
           <input
             type="text"
             placeholder="qwen/qwen-2.5-coder-32b-instruct"
@@ -180,22 +213,40 @@ export default function VaultPanel({
     }
   };
 
-  // 1. Session-only (In-memory / SessionStorage)
+  // 1. Session-only (Backend In-Memory / Zero Browser Storage)
   const setSessionKey = () =>
     wrap(async () => {
       const cleanKey = apiKey.trim();
       if (!cleanKey) throw new Error('Please paste your API key.');
       if (!endpoint.trim()) throw new Error('Enter the base endpoint URL.');
-      const newSecret: VaultSecret = {
+      const res = await saveKeyToServerSession({
         apiKey: cleanKey,
         endpoint: endpoint.trim(),
         model: model.trim(),
-      };
-      saveSessionSecret(newSecret);
+      });
       setApiKey('');
-      onUnlock(newSecret, true);
+      setServerMasked(res.maskedKey);
+      onUnlock(
+        {
+          apiKey: '', // Plaintext key is NOT held in client memory
+          endpoint: endpoint.trim(),
+          model: model.trim(),
+        },
+        true,
+        res.sessionId,
+      );
       onUsageChange(loadUsage());
-      flash('Session key activated! Stored strictly in memory/session for this work session.');
+      flash('API key sent to backend server RAM! Not stored in browser (immune to scraping).');
+    });
+
+  // Delete key from backend immediately
+  const deleteBackendKey = () =>
+    wrap(async () => {
+      await clearKeyFromServerSession();
+      setServerMasked(null);
+      setApiKey('');
+      onForget();
+      flash('API key deleted from backend RAM. Zero keys active.');
     });
 
   // 2. Encrypted Vault (PBKDF2 + AES-GCM)
@@ -272,56 +323,86 @@ export default function VaultPanel({
       flash('Vault imported. Enter your passphrase to unlock.');
     });
 
-  /** One click, no confirmation step: drop the key from inputs, React state, sessionStorage and the vault. */
+  /** One click, no confirmation step: drop the key from inputs, React state, backend session and the vault. */
   const destroyKey = () => {
     setApiKey('');
     setPass('');
     setConfirm('');
     setShowReplace(false);
     setShowRotate(false);
+    setServerMasked(null);
     purgeAllKeys();
     clearSessionSecret();
     clearVault();
     onForget();
     setRevision((r) => r + 1);
-    flash('Key destroyed — removed from inputs, app memory, session storage and the encrypted vault.');
+    flash('Key deleted — completely removed from backend memory and browser storage.');
   };
+
+  const isBackendActive = isSessionOnly || Boolean(serverMasked);
 
   return (
     <div className="vault" data-revision={revision}>
       <header className="vault-head">
         <span
           className={`vault-state ${
-            secret ? (isSessionOnly ? 'vault-session' : 'vault-open') : stored ? 'vault-locked' : ''
+            secret || serverMasked
+              ? isBackendActive
+                ? 'vault-session'
+                : 'vault-open'
+              : stored
+              ? 'vault-locked'
+              : ''
           }`}
         >
-          {secret ? (isSessionOnly ? 'session active' : 'vault unlocked') : stored ? 'locked' : 'no key'}
+          {secret || serverMasked
+            ? isBackendActive
+              ? 'backend ram active'
+              : 'vault unlocked'
+            : stored
+            ? 'locked'
+            : 'no key'}
         </span>
         <span className="vault-title">Bring-Your-Own API Key</span>
-        {secret || stored || apiKey ? (
+        {secret || stored || apiKey || serverMasked ? (
           <button type="button" className="destroy-btn" onClick={destroyKey}>
-            Clear / Destroy Key
+            Delete / Purge Key
           </button>
         ) : null}
       </header>
 
-      {secret ? (
+      {secret || serverMasked ? (
         <div className="vault-body">
+          <div className="vault-security-banner active">
+            <span className="vault-shield-icon">🛡️</span>
+            <div>
+              <strong>Scrape-Proof Backend Memory Active</strong>
+              <p>
+                Your API key is safely held in backend server RAM. It is <strong>never stored in the browser</strong>{' '}
+                (no localStorage, sessionStorage, or cookies), so it cannot be scraped.
+              </p>
+            </div>
+          </div>
+
           <div className="vault-row">
-            <span className="vault-label">Key Status</span>
-            <span className="vault-chip">{isSessionOnly ? 'Session-Only (In-Memory)' : 'Encrypted Vault'}</span>
+            <span className="vault-label">Storage</span>
+            <span className="vault-chip">
+              {isBackendActive ? 'Backend Server RAM (Not in Browser)' : 'Encrypted Vault'}
+            </span>
           </div>
           <div className="vault-row">
             <span className="vault-label">API Key</span>
-            <code className="vault-key">{maskKey(secret.apiKey)}</code>
+            <code className="vault-key">
+              {serverMasked || (secret?.apiKey ? maskKey(secret.apiKey) : '•••••••• (Backend Secured)')}
+            </code>
           </div>
           <div className="vault-row">
             <span className="vault-label">Endpoint</span>
-            <code className="vault-key">{secret.endpoint || '—'}</code>
+            <code className="vault-key">{secret?.endpoint || endpoint || 'Backend Default'}</code>
           </div>
           <div className="vault-row">
             <span className="vault-label">Model</span>
-            <code className="vault-key">{secret.model || '—'}</code>
+            <code className="vault-key">{secret?.model || model || 'Backend Default'}</code>
           </div>
 
           <div className="vault-meter">
@@ -335,6 +416,11 @@ export default function VaultPanel({
           </div>
 
           <div className="vault-actions">
+            {isBackendActive ? (
+              <button type="button" className="ghost danger" onClick={deleteBackendKey}>
+                🗑️ Delete Key from Backend
+              </button>
+            ) : null}
             <button type="button" className="ghost" onClick={onLock}>
               Lock session
             </button>
@@ -406,29 +492,36 @@ export default function VaultPanel({
               className={`vault-tab-btn ${tab === 'session' ? 'active' : ''}`}
               onClick={() => setTab('session')}
             >
-              Session Key (Ephemeral)
+              Backend In-Memory (Zero Browser Storage)
             </button>
             <button
               type="button"
               className={`vault-tab-btn ${tab === 'vault' ? 'active' : ''}`}
               onClick={() => setTab('vault')}
             >
-              Encrypted Vault {stored ? '(Locked)' : '(Persistent)'}
+              Encrypted Vault {stored ? '(Locked)' : '(Device Storage)'}
             </button>
           </div>
 
           {tab === 'session' ? (
             <div className="vault-form">
-              <p className="hint">
-                Enter an API key for your active beta testing workflows. It stays strictly in frontend memory, is never
-                saved permanently to disk, and can be destroyed at any moment with one click. Presets below only prefill —
-                every field stays editable.
-              </p>
+              <div className="vault-security-banner">
+                <span className="vault-shield-icon">🛡️</span>
+                <div>
+                  <strong>Scrape-Proof Backend Memory Input</strong>
+                  <p>
+                    Enter an API key to execute translation workflows. Your key is sent directly to the backend
+                    server's RAM and is <strong>never stored in the browser</strong> (no localStorage, sessionStorage, or
+                    cookies). When you finish, click <strong>Delete Key from Backend</strong> to erase it completely.
+                  </p>
+                </div>
+              </div>
+
               {connectionFields}
 
               <div className="vault-actions">
                 <button type="button" className="primary" disabled={busy} onClick={setSessionKey}>
-                  Set Key for this Session
+                  🔒 Set Backend Key for Workflows
                 </button>
                 <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
                   Import vault file

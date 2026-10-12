@@ -84,6 +84,7 @@ export interface EngineConfig {
   endpoint?: string;
   apiKey?: string;
   model?: string;
+  sessionId?: string;
 }
 
 export interface ProviderPreset {
