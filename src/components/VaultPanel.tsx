@@ -1,600 +1,272 @@
-import { useRef, useState, useEffect } from 'react';
-import type { UsageStats, VaultBlob, VaultSecret } from '../lib/vault.ts';
+import { useState, useEffect } from 'react';
+import type { UsageStats, VaultSecret } from '../lib/vault.ts';
 import {
-  clearKeyFromServerSession,
   clearSessionSecret,
-  clearVault,
-  decryptSecret,
-  detectPresetForKey,
-  keyPrefixWarning,
-  encryptSecret,
-  estimateTokens,
   fetchServerVaultStatus,
-  getServerSessionId,
-  loadVault,
-  loadUsage,
+  loadSessionSecret,
   maskKey,
-  parseVaultFile,
-  presetForEndpoint,
-  PROVIDER_PRESETS,
   purgeAllKeys,
-  resetUsage,
-  saveKeyToServerSession,
-  saveVault,
-  serializeVault,
+  saveSessionSecret,
 } from '../lib/vault.ts';
-import type { ProviderPreset } from '../lib/types.ts';
+
+export type ModelPresetId = 'gpt-4o-mini' | 'qwen/qwen-2.5-coder-32b-instruct' | 'deepseek/deepseek-chat' | 'custom';
 
 interface VaultPanelProps {
   secret: VaultSecret | null;
-  isSessionOnly: boolean;
+  isSessionOnly?: boolean;
   serverMaskedKey?: string | null;
+  hasServerBackendKey?: boolean;
   onUnlock: (secret: VaultSecret, sessionOnly?: boolean, sessionId?: string) => void;
   onLock: () => void;
   onForget: () => void;
-  onUsageChange: (usage: UsageStats) => void;
-}
-
-/** 1-click onramp for providers with a free token page (Hugging Face). */
-function TokenOnramp({ preset }: { preset: ProviderPreset }) {
-  if (!preset.tokenUrl) return null;
-  const tip =
-    "Select 'Read' permissions when creating your token. Your token is transferred to backend memory only and never saved to browser storage.";
-  return (
-    <div className="onramp">
-      <a className="onramp-link" href={preset.tokenUrl} target="_blank" rel="noopener noreferrer">
-        Get Free Hugging Face Token (No Card Required) ↗
-      </a>
-      <span className="onramp-tip" tabIndex={0} title={tip} aria-label={tip}>
-        i
-      </span>
-      <p className="onramp-note">{tip}</p>
-    </div>
-  );
+  onUsageChange?: (usage: UsageStats) => void;
 }
 
 export default function VaultPanel({
   secret,
-  isSessionOnly,
-  serverMaskedKey,
+  hasServerBackendKey: propHasServerKey,
   onUnlock,
-  onLock,
   onForget,
-  onUsageChange,
 }: VaultPanelProps) {
-  const [revision, setRevision] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [tab, setTab] = useState<'session' | 'vault'>('session');
-
-  // Direct inputs — presets only prefill these, they never lock them.
-  const [apiKey, setApiKey] = useState('');
+  const [apiKey, setApiKey] = useState<string>(() => secret?.apiKey || loadSessionSecret()?.apiKey || '');
   const [showPassword, setShowPassword] = useState(false);
-  const [endpoint, setEndpoint] = useState(PROVIDER_PRESETS[0].endpoint);
-  const [model, setModel] = useState(PROVIDER_PRESETS[0].defaultModel);
-  const [serverMasked, setServerMasked] = useState<string | null>(serverMaskedKey ?? null);
+  const [selectedModelPreset, setSelectedModelPreset] = useState<ModelPresetId>(() => {
+    const existingModel = secret?.model || loadSessionSecret()?.model;
+    if (existingModel === 'qwen/qwen-2.5-coder-32b-instruct') return 'qwen/qwen-2.5-coder-32b-instruct';
+    if (existingModel === 'deepseek/deepseek-chat') return 'deepseek/deepseek-chat';
+    if (existingModel === 'gpt-4o-mini') return 'gpt-4o-mini';
+    if (existingModel) return 'custom';
+    return 'gpt-4o-mini';
+  });
+  const [customModel, setCustomModel] = useState<string>(() => {
+    const existingModel = secret?.model || loadSessionSecret()?.model;
+    if (existingModel && !['gpt-4o-mini', 'qwen/qwen-2.5-coder-32b-instruct', 'deepseek/deepseek-chat'].includes(existingModel)) {
+      return existingModel;
+    }
+    return '';
+  });
+  const [endpoint, setEndpoint] = useState<string>(
+    () => secret?.endpoint || loadSessionSecret()?.endpoint || 'https://openrouter.ai/api/v1',
+  );
+  const [serverKeyDetected, setServerKeyDetected] = useState<boolean>(Boolean(propHasServerKey));
+  const [notice, setNotice] = useState<string | null>(null);
 
-  // Vault passphrase states
-  const [pass, setPass] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [showRotate, setShowRotate] = useState(false);
-  const [showReplace, setShowReplace] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  void revision;
-  const stored: VaultBlob | null = loadVault();
-  const usage = loadUsage();
-
+  // Check backend server environment status on mount
   useEffect(() => {
-    if (serverMaskedKey) {
-      setServerMasked(serverMaskedKey);
-    } else {
-      // Check server status in case page was reloaded with active backend session
-      const sid = getServerSessionId();
-      if (sid) {
-        fetchServerVaultStatus(sid).then((status) => {
-          if (status.hasSessionKey && status.maskedKey) {
-            setServerMasked(status.maskedKey);
-          }
-        });
+    let mounted = true;
+    fetchServerVaultStatus().then((status) => {
+      if (!mounted) return;
+      if (status.hasServerDefaultKey) {
+        setServerKeyDetected(true);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Sync state if secret changes externally
+  useEffect(() => {
+    if (secret?.apiKey && secret.apiKey !== apiKey) {
+      setApiKey(secret.apiKey);
+    }
+    if (secret?.endpoint && secret.endpoint !== endpoint) {
+      setEndpoint(secret.endpoint);
+    }
+    if (secret?.model) {
+      if (['gpt-4o-mini', 'qwen/qwen-2.5-coder-32b-instruct', 'deepseek/deepseek-chat'].includes(secret.model)) {
+        setSelectedModelPreset(secret.model as ModelPresetId);
+      } else {
+        setSelectedModelPreset('custom');
+        setCustomModel(secret.model);
       }
     }
-  }, [serverMaskedKey]);
+  }, [secret]);
 
-  const flash = (message: string): void => {
-    setNotice(message);
-    setError(null);
+  const getEffectiveModel = (preset = selectedModelPreset, custom = customModel): string => {
+    if (preset === 'custom') {
+      return custom.trim() || 'gpt-4o-mini';
+    }
+    return preset;
   };
 
-  /** Derived from what is typed, so a chip lights up for a matching URL and nothing is ever locked. */
-  const activePreset = presetForEndpoint(endpoint);
-  const keyWarning = keyPrefixWarning(apiKey, endpoint);
-
-  const applyPreset = (preset: ProviderPreset) => {
-    setEndpoint(preset.endpoint);
-    setModel(preset.defaultModel);
+  const getEffectiveEndpoint = (ep = endpoint): string => {
+    return ep.trim() || 'https://openrouter.ai/api/v1';
   };
 
-  /** Pasting a recognisable key (sk-or-, AIza, hf_) prefills its provider — unless a custom URL is already typed. */
-  const handleKeyChange = (value: string) => {
-    setApiKey(value);
-    const detected = detectPresetForKey(value);
-    if (detected && detected.id !== activePreset?.id && (activePreset || !endpoint.trim())) {
-      applyPreset(detected);
-      flash(`Looks like a ${detected.label} key — URL and model prefilled. Edit them freely.`);
+  const applyChanges = (nextKey: string, nextPreset: ModelPresetId, nextCustomModel: string, nextEndpoint: string) => {
+    const cleanKey = nextKey.trim();
+    const effectiveModel = getEffectiveModel(nextPreset, nextCustomModel);
+    const cleanEndpoint = getEffectiveEndpoint(nextEndpoint);
+
+    const secretPayload: VaultSecret = {
+      apiKey: cleanKey,
+      endpoint: cleanEndpoint,
+      model: effectiveModel,
+    };
+
+    // Stored strictly in frontend session memory
+    saveSessionSecret(secretPayload);
+
+    if (cleanKey || serverKeyDetected) {
+      onUnlock(secretPayload, true);
     }
   };
 
-  const modelListId = activePreset?.models ? `models-${activePreset.id}` : undefined;
-
-  const connectionFields = (
-    <>
-      <div className="preset-chips" role="group" aria-label="Quick presets (optional)">
-        {PROVIDER_PRESETS.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            className={`preset-chip ${activePreset?.id === p.id ? 'on' : ''}`}
-            aria-pressed={activePreset?.id === p.id}
-            title={p.hint}
-            onClick={() => applyPreset(p)}
-          >
-            {p.label.replace(/ \(.*\)$/, '')}
-          </button>
-        ))}
-      </div>
-      {activePreset?.tokenUrl ? <TokenOnramp preset={activePreset} /> : null}
-      <label className="vault-input-label">
-        <span>API Key (Backend Memory Input)</span>
-        <div className="vault-key-input-wrapper">
-          <input
-            type={showPassword ? 'text' : 'password'}
-            placeholder="sk-or-…, sk-…, AIza…, hf_… — your personal API key"
-            autoComplete="off"
-            spellCheck={false}
-            value={apiKey}
-            onChange={(e) => handleKeyChange(e.target.value)}
-          />
-          <button
-            type="button"
-            className="vault-eye-btn"
-            onClick={() => setShowPassword((v) => !v)}
-            title={showPassword ? 'Hide key' : 'Show key'}
-          >
-            {showPassword ? 'Hide' : 'Show'}
-          </button>
-        </div>
-      </label>
-      {keyWarning ? <p className="hint key-warning">{keyWarning}</p> : null}
-      <div className="vault-grid-2">
-        <label className="vault-input-label">
-          <span>Base Endpoint URL</span>
-          <input
-            type="text"
-            placeholder="https://openrouter.ai/api/v1"
-            spellCheck={false}
-            value={endpoint}
-            onChange={(e) => setEndpoint(e.target.value)}
-          />
-        </label>
-        <label className="vault-input-label">
-          <span>Model Identifier</span>
-          <input
-            type="text"
-            placeholder="qwen/qwen-2.5-coder-32b-instruct"
-            spellCheck={false}
-            list={modelListId}
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-          />
-          {activePreset?.models ? (
-            <datalist id={modelListId}>
-              {activePreset.models.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
-          ) : null}
-        </label>
-      </div>
-    </>
-  );
-
-  const wrap = async (fn: () => Promise<void>): Promise<void> => {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-      setRevision((r) => r + 1);
-    }
+  const handleKeyChange = (val: string) => {
+    setApiKey(val);
+    setNotice(null);
+    applyChanges(val, selectedModelPreset, customModel, endpoint);
   };
 
-  // 1. Session-only (Backend In-Memory / Zero Browser Storage)
-  const setSessionKey = () =>
-    wrap(async () => {
-      const cleanKey = apiKey.trim();
-      if (!cleanKey) throw new Error('Please paste your API key.');
-      if (!endpoint.trim()) throw new Error('Enter the base endpoint URL.');
-      const res = await saveKeyToServerSession({
-        apiKey: cleanKey,
-        endpoint: endpoint.trim(),
-        model: model.trim(),
-      });
-      setApiKey('');
-      setServerMasked(res.maskedKey);
-      onUnlock(
-        {
-          apiKey: '', // Plaintext key is NOT held in client memory
-          endpoint: endpoint.trim(),
-          model: model.trim(),
-        },
-        true,
-        res.sessionId,
-      );
-      onUsageChange(loadUsage());
-      flash('API key sent to backend server RAM! Not stored in browser (immune to scraping).');
-    });
-
-  // Delete key from backend immediately
-  const deleteBackendKey = () =>
-    wrap(async () => {
-      await clearKeyFromServerSession();
-      setServerMasked(null);
-      setApiKey('');
-      onForget();
-      flash('API key deleted from backend RAM. Zero keys active.');
-    });
-
-  // 2. Encrypted Vault (PBKDF2 + AES-GCM)
-  const createVault = () =>
-    wrap(async () => {
-      if (pass.length < 8) throw new Error('Use a passphrase of at least 8 characters.');
-      if (pass !== confirm) throw new Error('The passphrases do not match.');
-      if (!apiKey.trim()) throw new Error('Paste the API key you want to protect.');
-      const newSecret = { apiKey: apiKey.trim(), endpoint: endpoint.trim(), model: model.trim() };
-      const blob = await encryptSecret(pass, newSecret);
-      saveVault(blob);
-      setPass('');
-      setConfirm('');
-      setApiKey('');
-      onUnlock(newSecret, false);
-      onUsageChange(loadUsage());
-      flash('Key encrypted and stored with AES-GCM. Unlocked for current session.');
-    });
-
-  const unlock = () =>
-    wrap(async () => {
-      if (!stored) throw new Error('No vault on this device yet.');
-      const next = await decryptSecret(pass, stored);
-      setPass('');
-      onUnlock(next, false);
-      onUsageChange(loadUsage());
-      flash('Vault unlocked — the key lives in memory until locked or cleared.');
-    });
-
-  const rotatePassphrase = () =>
-    wrap(async () => {
-      if (!stored || !secret) throw new Error('Unlock the vault first.');
-      if (pass.length < 8) throw new Error('Use a new passphrase of at least 8 characters.');
-      if (pass !== confirm) throw new Error('The new passphrases do not match.');
-      saveVault(await encryptSecret(pass, secret));
-      setPass('');
-      setConfirm('');
-      setShowRotate(false);
-      flash('Passphrase changed successfully.');
-    });
-
-  const replaceKey = () =>
-    wrap(async () => {
-      if (!stored || !secret) throw new Error('Unlock the vault first.');
-      if (pass.length < 8) throw new Error('Enter the passphrase to re-encrypt the vault.');
-      if (!apiKey.trim()) throw new Error('Paste the replacement API key.');
-      const next = { apiKey: apiKey.trim(), endpoint: endpoint.trim(), model: model.trim() };
-      saveVault(await encryptSecret(pass, next));
-      setPass('');
-      setApiKey('');
-      setShowReplace(false);
-      onUnlock(next, false);
-      onUsageChange(loadUsage());
-      flash('Key replaced and re-encrypted.');
-    });
-
-  const exportFile = () => {
-    if (!stored) return;
-    const url = URL.createObjectURL(new Blob([serializeVault(stored)], { type: 'application/json' }));
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'code-translator-key.vault.json';
-    a.click();
-    URL.revokeObjectURL(url);
-    flash('Encrypted vault exported.');
+  const handleModelPresetChange = (preset: ModelPresetId) => {
+    setSelectedModelPreset(preset);
+    setNotice(null);
+    applyChanges(apiKey, preset, customModel, endpoint);
   };
 
-  const importFile = (file: File) =>
-    wrap(async () => {
-      const blob = parseVaultFile(await file.text());
-      saveVault(blob);
-      onForget();
-      setTab('vault');
-      flash('Vault imported. Enter your passphrase to unlock.');
-    });
+  const handleCustomModelChange = (val: string) => {
+    setCustomModel(val);
+    setNotice(null);
+    applyChanges(apiKey, 'custom', val, endpoint);
+  };
 
-  /** One click, no confirmation step: drop the key from inputs, React state, backend session and the vault. */
-  const destroyKey = () => {
+  const handleEndpointChange = (val: string) => {
+    setEndpoint(val);
+    setNotice(null);
+    applyChanges(apiKey, selectedModelPreset, customModel, val);
+  };
+
+  const handleClearKey = () => {
     setApiKey('');
-    setPass('');
-    setConfirm('');
-    setShowReplace(false);
-    setShowRotate(false);
-    setServerMasked(null);
-    purgeAllKeys();
+    setCustomModel('');
+    setSelectedModelPreset('gpt-4o-mini');
+    setEndpoint('https://openrouter.ai/api/v1');
     clearSessionSecret();
-    clearVault();
+    purgeAllKeys();
     onForget();
-    setRevision((r) => r + 1);
-    flash('Key deleted — completely removed from backend memory and browser storage.');
+    setNotice('API key wiped instantly from session state.');
   };
 
-  const isBackendActive = isSessionOnly || Boolean(serverMasked);
+  const isKeyActive = Boolean(apiKey.trim() || secret?.apiKey);
+  const isBackendKeyActive = serverKeyDetected && !isKeyActive;
 
   return (
-    <div className="vault" data-revision={revision}>
+    <section className="panel vault">
       <header className="vault-head">
         <span
-          className={`vault-state ${
-            secret || serverMasked
-              ? isBackendActive
-                ? 'vault-session'
-                : 'vault-open'
-              : stored
-              ? 'vault-locked'
-              : ''
-          }`}
+          className={`vault-state ${isKeyActive ? 'vault-open' : isBackendKeyActive ? 'vault-session' : ''}`}
         >
-          {secret || serverMasked
-            ? isBackendActive
-              ? 'backend ram active'
-              : 'vault unlocked'
-            : stored
-            ? 'locked'
-            : 'no key'}
+          {isKeyActive ? 'session key active' : isBackendKeyActive ? 'backend key active' : 'no key'}
         </span>
-        <span className="vault-title">Bring-Your-Own API Key</span>
-        {secret || stored || apiKey || serverMasked ? (
-          <button type="button" className="destroy-btn" onClick={destroyKey}>
-            Delete / Purge Key
+        <h2 className="vault-title">AI Translator Key &amp; Model</h2>
+
+        <div className="panel-actions" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {serverKeyDetected && (
+            <span className="backend-key-badge" title="Active on server via process.env.API_KEY or GEMINI_API_KEY">
+              Using Backend Configured Key
+            </span>
+          )}
+          <button
+            type="button"
+            className="clear-key-btn"
+            onClick={handleClearKey}
+            title="Wipe API key instantly from frontend session"
+          >
+            Clear Key
           </button>
-        ) : null}
+        </div>
       </header>
 
-      {secret || serverMasked ? (
-        <div className="vault-body">
-          <div className="vault-security-banner active">
-            <span className="vault-shield-icon">🛡️</span>
-            <div>
-              <strong>Scrape-Proof Backend Memory Active</strong>
-              <p>
-                Your API key is safely held in backend server RAM. It is <strong>never stored in the browser</strong>{' '}
-                (no localStorage, sessionStorage, or cookies), so it cannot be scraped.
-              </p>
+      <div className="vault-body">
+        {/* Universal Single Key Field + Model Selector */}
+        <div className="vault-key-model-grid">
+          <label className="vault-input-label">
+            <span>Universal API Key (Frontend Session Only)</span>
+            <div className="vault-key-input-wrapper">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                placeholder={
+                  serverKeyDetected
+                    ? 'Optional: Override Backend Key (sk-..., sk-or-..., AIza...)'
+                    : 'Paste API Key (sk-..., sk-or-..., AIza...)'
+                }
+                autoComplete="off"
+                spellCheck={false}
+                value={apiKey}
+                onChange={(e) => handleKeyChange(e.target.value)}
+              />
+              <button
+                type="button"
+                className="vault-eye-btn"
+                onClick={() => setShowPassword((v) => !v)}
+                title={showPassword ? 'Hide key' : 'Show key'}
+              >
+                {showPassword ? 'Hide' : 'Show'}
+              </button>
             </div>
-          </div>
+          </label>
 
+          <label className="vault-input-label">
+            <span>Model Selector</span>
+            <select
+              value={selectedModelPreset}
+              onChange={(e) => handleModelPresetChange(e.target.value as ModelPresetId)}
+            >
+              <option value="gpt-4o-mini">gpt-4o-mini (Fast, low-cost)</option>
+              <option value="qwen/qwen-2.5-coder-32b-instruct">qwen/qwen-2.5-coder-32b-instruct (Fast, coding)</option>
+              <option value="deepseek/deepseek-chat">deepseek/deepseek-chat</option>
+              <option value="custom">custom (Type any model ID)</option>
+            </select>
+          </label>
+        </div>
+
+        {/* Custom Model ID field when 'custom' is picked */}
+        {selectedModelPreset === 'custom' && (
+          <label className="vault-input-label">
+            <span>Custom Model Identifier</span>
+            <input
+              type="text"
+              placeholder="e.g. meta-llama/llama-3.3-70b-instruct"
+              spellCheck={false}
+              value={customModel}
+              onChange={(e) => handleCustomModelChange(e.target.value)}
+            />
+          </label>
+        )}
+
+        {/* Optional Collapsible Endpoint URL */}
+        <details className="vault-endpoint-details">
+          <summary>
+            Endpoint Base URL: <code>{endpoint || 'https://openrouter.ai/api/v1'}</code>
+          </summary>
+          <div className="vault-endpoint-content">
+            <label className="vault-input-label">
+              <span>Base URL (defaults to https://openrouter.ai/api/v1)</span>
+              <input
+                type="text"
+                placeholder="https://openrouter.ai/api/v1"
+                spellCheck={false}
+                value={endpoint}
+                onChange={(e) => handleEndpointChange(e.target.value)}
+              />
+            </label>
+          </div>
+        </details>
+
+        {/* Active Key and Model indicator */}
+        {isKeyActive && (
           <div className="vault-row">
-            <span className="vault-label">Storage</span>
-            <span className="vault-chip">
-              {isBackendActive ? 'Backend Server RAM (Not in Browser)' : 'Encrypted Vault'}
+            <span className="vault-label">Active Key</span>
+            <code className="vault-key">{maskKey(apiKey || secret?.apiKey || '')}</code>
+            <span className="vault-label" style={{ marginLeft: 'auto', minWidth: 'auto' }}>
+              Model: <b>{getEffectiveModel()}</b>
             </span>
           </div>
-          <div className="vault-row">
-            <span className="vault-label">API Key</span>
-            <code className="vault-key">
-              {serverMasked || (secret?.apiKey ? maskKey(secret.apiKey) : '•••••••• (Backend Secured)')}
-            </code>
-          </div>
-          <div className="vault-row">
-            <span className="vault-label">Endpoint</span>
-            <code className="vault-key">{secret?.endpoint || endpoint || 'Backend Default'}</code>
-          </div>
-          <div className="vault-row">
-            <span className="vault-label">Model</span>
-            <code className="vault-key">{secret?.model || model || 'Backend Default'}</code>
-          </div>
+        )}
 
-          <div className="vault-meter">
-            <div>
-              <b>{usage.requests}</b> request{usage.requests === 1 ? '' : 's'} on your key
-            </div>
-            <div>
-              ≈ <b>{estimateTokens(usage.promptChars + usage.outputChars).toLocaleString()}</b> tokens since{' '}
-              {new Date(usage.since).toLocaleDateString()}
-            </div>
-          </div>
-
-          <div className="vault-actions">
-            {isBackendActive ? (
-              <button type="button" className="ghost danger" onClick={deleteBackendKey}>
-                🗑️ Delete Key from Backend
-              </button>
-            ) : null}
-            <button type="button" className="ghost" onClick={onLock}>
-              Lock session
-            </button>
-            {!isSessionOnly && stored ? (
-              <>
-                <button type="button" className="ghost" onClick={exportFile}>
-                  Export vault file
-                </button>
-                <button type="button" className="ghost" onClick={() => setShowRotate((v) => !v)}>
-                  Change passphrase
-                </button>
-                <button type="button" className="ghost" onClick={() => setShowReplace((v) => !v)}>
-                  Replace key
-                </button>
-              </>
-            ) : null}
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => {
-                resetUsage();
-                onUsageChange(loadUsage());
-              }}
-            >
-              Reset meter
-            </button>
-          </div>
-
-          {showReplace ? (
-            <div className="vault-form">
-              {connectionFields}
-              <input
-                type="password"
-                placeholder="passphrase to re-encrypt"
-                value={pass}
-                onChange={(e) => setPass(e.target.value)}
-              />
-              <button type="button" className="primary" disabled={busy} onClick={replaceKey}>
-                Replace &amp; re-encrypt
-              </button>
-            </div>
-          ) : null}
-
-          {showRotate ? (
-            <div className="vault-form">
-              <input
-                type="password"
-                placeholder="new passphrase"
-                value={pass}
-                onChange={(e) => setPass(e.target.value)}
-              />
-              <input
-                type="password"
-                placeholder="repeat new passphrase"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-              />
-              <button type="button" className="primary" disabled={busy} onClick={rotatePassphrase}>
-                Re-encrypt vault
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : (
-        <div className="vault-body">
-          <div className="vault-tab-bar">
-            <button
-              type="button"
-              className={`vault-tab-btn ${tab === 'session' ? 'active' : ''}`}
-              onClick={() => setTab('session')}
-            >
-              Backend In-Memory (Zero Browser Storage)
-            </button>
-            <button
-              type="button"
-              className={`vault-tab-btn ${tab === 'vault' ? 'active' : ''}`}
-              onClick={() => setTab('vault')}
-            >
-              Encrypted Vault {stored ? '(Locked)' : '(Device Storage)'}
-            </button>
-          </div>
-
-          {tab === 'session' ? (
-            <div className="vault-form">
-              <div className="vault-security-banner">
-                <span className="vault-shield-icon">🛡️</span>
-                <div>
-                  <strong>Scrape-Proof Backend Memory Input</strong>
-                  <p>
-                    Enter an API key to execute translation workflows. Your key is sent directly to the backend
-                    server's RAM and is <strong>never stored in the browser</strong> (no localStorage, sessionStorage, or
-                    cookies). When you finish, click <strong>Delete Key from Backend</strong> to erase it completely.
-                  </p>
-                </div>
-              </div>
-
-              {connectionFields}
-
-              <div className="vault-actions">
-                <button type="button" className="primary" disabled={busy} onClick={setSessionKey}>
-                  🔒 Set Backend Key for Workflows
-                </button>
-                <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
-                  Import vault file
-                </button>
-              </div>
-            </div>
-          ) : stored ? (
-            <div className="vault-form">
-              <p className="hint">
-                This browser holds an encrypted vault protected with PBKDF2-SHA256 (600,000 iterations) + AES-GCM-256. Enter
-                your passphrase to unlock.
-              </p>
-              <input
-                type="password"
-                placeholder="Enter passphrase"
-                value={pass}
-                onChange={(e) => setPass(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && void unlock()}
-              />
-              <div className="vault-actions">
-                <button type="button" className="primary" disabled={busy} onClick={unlock}>
-                  Unlock Vault
-                </button>
-                <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
-                  Import vault file
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="vault-form">
-              <p className="hint">
-                Store your API key encrypted at rest on this device. Decrypted only in memory with your passphrase.
-              </p>
-              {connectionFields}
-              <input
-                type="password"
-                placeholder="Choose passphrase (min 8 characters)"
-                value={pass}
-                onChange={(e) => setPass(e.target.value)}
-              />
-              <input
-                type="password"
-                placeholder="Repeat passphrase"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-              />
-              <div className="vault-actions">
-                <button type="button" className="primary" disabled={busy} onClick={createVault}>
-                  Encrypt &amp; Store
-                </button>
-                <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
-                  Import vault file
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      <input
-        ref={fileRef}
-        type="file"
-        accept="application/json,.json"
-        hidden
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) void importFile(file);
-          e.target.value = '';
-        }}
-      />
-
-      {notice ? <p className="vault-notice">{notice}</p> : null}
-      {error ? <p className="error-line">{error}</p> : null}
-    </div>
+        {notice && <p className="vault-notice">{notice}</p>}
+      </div>
+    </section>
   );
 }

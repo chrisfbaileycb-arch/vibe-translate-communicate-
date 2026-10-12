@@ -421,9 +421,21 @@ export default function App() {
   }, [mode, reverse, model]);
 
   const workflowGraph = useMemo(() => {
-    if (!model || !(model.workflow || isWorkflowTarget(target))) return null;
-    return ensureWorkflow(model, generated?.filename);
-  }, [model, target, generated]);
+    if (model) {
+      return ensureWorkflow(model, generated?.filename);
+    }
+    return ensureWorkflow(
+      {
+        id: 'init',
+        kind: 'system/pipeline',
+        label: 'LinguaCode Translation Pipeline',
+        props: [],
+        warnings: [],
+        updatedAt: Date.now(),
+      },
+      generated?.filename || 'component.tsx',
+    );
+  }, [model, generated]);
 
   const codeView =
     mode === 'reverse' && reverse

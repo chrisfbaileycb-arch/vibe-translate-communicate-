@@ -34,9 +34,10 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 // Initialize server-side Gemini if environment API key is present
-const serverGemini = process.env.GEMINI_API_KEY
+const geminiKey = process.env.GEMINI_API_KEY || (process.env.API_KEY?.startsWith('AIza') ? process.env.API_KEY : '');
+const serverGemini = geminiKey
   ? new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
+      apiKey: geminiKey,
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build',
@@ -51,15 +52,16 @@ const serverGemini = process.env.GEMINI_API_KEY
 app.get('/api/vault/status', (req: Request, res: Response) => {
   const sessionId = (req.headers['x-session-id'] as string) || '';
   const session = serverSessions.get(sessionId);
+  const hasServerDefaultKey = Boolean(process.env.API_KEY || process.env.GEMINI_API_KEY);
 
   res.json({
-    hasServerDefaultKey: Boolean(serverGemini),
+    hasServerDefaultKey,
     hasSessionKey: Boolean(session?.apiKey),
-    endpoint: session?.endpoint || (serverGemini ? 'server-gemini' : ''),
-    model: session?.model || (serverGemini ? 'gemini-3.8-flash' : ''),
+    endpoint: session?.endpoint || (serverGemini ? 'server-gemini' : (process.env.API_KEY ? 'https://openrouter.ai/api/v1' : '')),
+    model: session?.model || (serverGemini ? 'gemini-2.5-flash' : 'gpt-4o-mini'),
     maskedKey: session?.apiKey
       ? `${session.apiKey.slice(0, 3)}••••••••${session.apiKey.slice(-4)}`
-      : serverGemini
+      : hasServerDefaultKey
       ? '•••••••• (Server Environment)'
       : null,
   });
@@ -137,8 +139,8 @@ app.post('/api/translate', async (req: Request, res: Response) => {
     const sessionId = (req.headers['x-session-id'] as string) || '';
     const session = serverSessions.get(sessionId);
 
-    // Resolve key: 1. Ephemeral header/body key, 2. Backend session key, 3. Server default Gemini key
-    const effectiveKey = ephemeralKey || session?.apiKey || process.env.GEMINI_API_KEY || '';
+    // Resolve key: 1. Ephemeral header/body key, 2. Backend session key, 3. Server process.env.API_KEY / GEMINI_API_KEY
+    const effectiveKey = ephemeralKey || session?.apiKey || process.env.API_KEY || process.env.GEMINI_API_KEY || '';
     const effectiveEndpoint = customEndpoint || session?.endpoint || '';
     const effectiveModel = customModel || session?.model || '';
 
