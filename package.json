@@ -5,12 +5,14 @@
   "type": "module",
   "description": "Voice-to-code translator with a semantic layer, live visual verification and two-way code<->preview binding.",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 0.0.0.0 --port 3000",
+    "lint": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "node --experimental-strip-types src/lib/smoke.test.ts && node --experimental-strip-types src/lib/vault.test.ts"
   },
   "dependencies": {
+    "firebase": "^13.0.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['uid', 'email', 'displayName', 'createdAt', 'updatedAt']) &&
+             data.uid == request.auth.uid &&
+             data.email is string && data.email.size() <= 256 &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 128)) &&
+             data.createdAt is string && data.createdAt.size() <= 64 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    function isValidTranslation(data, userId) {
+      return data.keys().hasAll(['id', 'userId', 'label', 'kind', 'modelData', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'label', 'kind', 'sourceText', 'target', 'modelData', 'createdAt', 'updatedAt']) &&
+             data.userId == userId &&
+             data.id is string && data.id.size() <= 128 &&
+             data.label is string && data.label.size() <= 128 &&
+             data.kind is string && data.kind.size() <= 64 &&
+             (!('sourceText' in data) || (data.sourceText is string && data.sourceText.size() <= 2048)) &&
+             (!('target' in data) || (data.target is string && data.target.size() <= 64)) &&
+             data.modelData is string && data.modelData.size() <= 65536 &&
+             data.createdAt is string && data.createdAt.size() <= 64 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    // Health check endpoint for connection testing
+    match /test/connection {
+      allow get: if true;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUserProfile(incoming());
+      allow update: if isOwner(userId) && isValidId(userId) && isValidUserProfile(incoming()) &&
+                    incoming().uid == existing().uid &&
+                    incoming().createdAt == existing().createdAt &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'updatedAt']);
+      allow delete: if isOwner(userId);
+
+      match /translations/{translationId} {
+        allow get: if isOwner(userId) && isValidId(translationId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(translationId) && isValidTranslation(incoming(), userId);
+        allow update: if isOwner(userId) && isValidId(translationId) && isValidTranslation(incoming(), userId) &&
+                      incoming().userId == existing().userId &&
+                      incoming().id == existing().id &&
+                      incoming().createdAt == existing().createdAt &&
+                      incoming().diff(existing()).affectedKeys().hasOnly(['label', 'kind', 'sourceText', 'target', 'modelData', 'updatedAt']);
+        allow delete: if isOwner(userId) && isValidId(translationId);
+      }
+    }
+  }
+}

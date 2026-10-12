@@ -355,6 +355,24 @@ function generateJson(m: IntentModel): GeneratedCode {
   return b.build(`${slug(m.label)}.intent.json`, 'json');
 }
 
+/** Exports and downloads the semantic IntentModel as a JSON file to the user's disk */
+export function exportModelAsJson(model: IntentModel): { filename: string; json: string } {
+  const filename = `${slug(model.label || 'semantic-model')}.intent.json`;
+  const json = JSON.stringify(model, null, 2);
+  if (typeof document !== 'undefined') {
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+  return { filename, json };
+}
+
 export function generate(model: IntentModel, target: TargetId): GeneratedCode {
   switch (target) {
     case 'html':

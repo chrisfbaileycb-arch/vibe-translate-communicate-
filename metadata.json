@@ -1,0 +1,7 @@
+{
+  "name": "Code Translator",
+  "description": "Speak an idea, see the semantic model, get the code, and verify it visually — with two-way binding between the render and the source.",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,5 +1,6 @@
-import { useMemo } from 'react';
-import type { CodeRange } from '../lib/types.ts';
+import { useMemo, useState } from 'react';
+import type { CodeRange, IntentModel } from '../lib/types.ts';
+import { generate } from '../lib/generate.ts';
 
 interface CodePanelProps {
   code: string;
@@ -8,9 +9,21 @@ interface CodePanelProps {
   lineMap: Record<string, CodeRange[]>;
   selection: string | null;
   onSelect: (key: string | null) => void;
+  model?: IntentModel | null;
 }
 
-export default function CodePanel({ code, language, filename, lineMap, selection, onSelect }: CodePanelProps) {
+export default function CodePanel({
+  code,
+  language,
+  filename,
+  lineMap,
+  selection,
+  onSelect,
+  model,
+}: CodePanelProps) {
+  const [copied, setCopied] = useState(false);
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
+
   const lines = useMemo(() => code.split('\n'), [code]);
 
   const nodeByLine = useMemo(() => {
@@ -32,14 +45,63 @@ export default function CodePanel({ code, language, filename, lineMap, selection
     return set;
   }, [lineMap, selection]);
 
-  const copy = () => navigator.clipboard?.writeText(code);
-  const download = () => {
-    const url = URL.createObjectURL(new Blob([code], { type: 'text/plain' }));
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
+  const copy = async () => {
+    try {
+      await navigator.clipboard?.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* ignore clipboard permission errors */
+    }
+  };
+
+  const saveFileToDisk = (fileContent: string, name: string, mimeType: string) => {
+    const blob = new Blob([fileContent], { type: `${mimeType};charset=utf-8` });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
     URL.revokeObjectURL(url);
+
+    setDownloadNotice(`Downloaded ${name}`);
+    setTimeout(() => setDownloadNotice(null), 3000);
+  };
+
+  const downloadCurrent = () => {
+    let mime = 'text/plain';
+    if (filename.endsWith('.tsx') || filename.endsWith('.ts')) mime = 'text/typescript';
+    else if (filename.endsWith('.py')) mime = 'text/x-python';
+    else if (filename.endsWith('.html')) mime = 'text/html';
+    else if (filename.endsWith('.json')) mime = 'application/json';
+
+    saveFileToDisk(code, filename, mime);
+  };
+
+  const downloadSpecificFormat = (fmt: 'tsx' | 'py' | 'html') => {
+    if (model) {
+      if (fmt === 'tsx') {
+        const gen = generate(model, 'nextjs');
+        saveFileToDisk(gen.code, gen.filename, 'text/typescript');
+      } else if (fmt === 'py') {
+        const gen = generate(model, 'python');
+        saveFileToDisk(gen.code, gen.filename, 'text/x-python');
+      } else if (fmt === 'html') {
+        const gen = generate(model, 'html');
+        saveFileToDisk(gen.code, gen.filename, 'text/html');
+      }
+    } else {
+      // In reverse mode or fallback without an active IntentModel
+      const baseName = filename.replace(/\.[^.]+$/, '') || 'code';
+      const extMime = {
+        tsx: 'text/typescript',
+        py: 'text/x-python',
+        html: 'text/html',
+      }[fmt];
+      saveFileToDisk(code, `${baseName}.${fmt}`, extMime);
+    }
   };
 
   return (
@@ -50,14 +112,43 @@ export default function CodePanel({ code, language, filename, lineMap, selection
           {filename} · {language}
         </span>
         <div className="panel-actions">
-          <button type="button" className="ghost" onClick={copy}>
-            Copy
+          <button type="button" className="ghost" onClick={copy} title="Copy code to clipboard">
+            {copied ? 'Copied!' : 'Copy'}
           </button>
-          <button type="button" className="ghost" onClick={download}>
+          <button type="button" className="ghost" onClick={downloadCurrent} title={`Download ${filename}`}>
             Download
           </button>
+
+          <div className="download-group" title="Quick download in specific format">
+            <button
+              type="button"
+              className="download-pill"
+              onClick={() => downloadSpecificFormat('tsx')}
+              title="Download as React / Next.js (.tsx)"
+            >
+              .tsx
+            </button>
+            <button
+              type="button"
+              className="download-pill"
+              onClick={() => downloadSpecificFormat('py')}
+              title="Download as Python (.py)"
+            >
+              .py
+            </button>
+            <button
+              type="button"
+              className="download-pill"
+              onClick={() => downloadSpecificFormat('html')}
+              title="Download as HTML (.html)"
+            >
+              .html
+            </button>
+          </div>
         </div>
       </header>
+
+      {downloadNotice ? <div className="vault-notice">{downloadNotice}</div> : null}
 
       <div className="code-scroll">
         {lines.map((line, i) => {

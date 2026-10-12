@@ -35,8 +35,48 @@ export interface UsageStats {
 }
 
 const VAULT_KEY = 'ct.vault.v1';
+const SESSION_VAULT_KEY = 'ct.session_vault.v1';
 const USAGE_KEY = 'ct.usage.v1';
 const PBKDF2_ITERATIONS = 600_000;
+
+export interface ProviderPreset {
+  id: string;
+  label: string;
+  endpoint: string;
+  defaultModel: string;
+  hint: string;
+}
+
+export const PROVIDER_PRESETS: ProviderPreset[] = [
+  {
+    id: 'gemini',
+    label: 'Google Gemini (OpenAI-compatible)',
+    endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    defaultModel: 'gemini-2.5-flash',
+    hint: 'Enter your Google AI Studio Gemini API key.',
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    endpoint: 'https://api.openai.com/v1',
+    defaultModel: 'gpt-4o-mini',
+    hint: 'Enter your OpenAI API key.',
+  },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    endpoint: 'https://openrouter.ai/api/v1',
+    defaultModel: 'meta-llama/llama-3.3-70b-instruct',
+    hint: 'Enter your OpenRouter API key.',
+  },
+  {
+    id: 'custom',
+    label: 'Custom endpoint (Ollama / Local / Proxy)',
+    endpoint: 'http://localhost:11434/v1',
+    defaultModel: 'llama3',
+    hint: 'Any OpenAI-compatible /chat/completions endpoint.',
+  },
+];
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -128,6 +168,36 @@ export function clearVault(): void {
 
 export function hasVault(): boolean {
   return loadVault() !== null;
+}
+
+export function saveSessionSecret(secret: VaultSecret): void {
+  try {
+    sessionStorage.setItem(SESSION_VAULT_KEY, JSON.stringify(secret));
+  } catch {
+    /* ignore session storage restrictions */
+  }
+}
+
+export function loadSessionSecret(): VaultSecret | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_VAULT_KEY);
+    return raw ? (JSON.parse(raw) as VaultSecret) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearSessionSecret(): void {
+  try {
+    sessionStorage.removeItem(SESSION_VAULT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function purgeAllKeys(): void {
+  clearSessionSecret();
+  clearVault();
 }
 
 /** Portable encrypted vault file — safe to hand to someone; useless without the passphrase. */

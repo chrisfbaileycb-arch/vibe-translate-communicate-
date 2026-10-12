@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import type { IntentModel, IntentProp } from '../lib/types.ts';
+import { exportModelAsJson } from '../lib/generate.ts';
 
 interface IntentPanelProps {
   model: IntentModel | null;
@@ -78,6 +80,8 @@ function PropEditor({
 }
 
 export default function IntentPanel({ model, selection, onSelect, onChange }: IntentPanelProps) {
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
+
   if (!model) {
     return (
       <section className="panel intent-panel">
@@ -92,12 +96,30 @@ export default function IntentPanel({ model, selection, onSelect, onChange }: In
     );
   }
 
+  const handleDownload = () => {
+    const { filename } = exportModelAsJson(model);
+    setDownloadNotice(`Downloaded ${filename}`);
+    setTimeout(() => setDownloadNotice(null), 3000);
+  };
+
   return (
     <section className="panel intent-panel">
       <header className="panel-head">
         <h2>1 · Semantic layer</h2>
         <span className="chip">{model.kind}</span>
+        <div className="panel-actions">
+          <button
+            type="button"
+            className="ghost"
+            onClick={handleDownload}
+            title="Download this semantic model as a JSON file"
+          >
+            Download JSON
+          </button>
+        </div>
       </header>
+
+      {downloadNotice ? <div className="vault-notice">{downloadNotice}</div> : null}
 
       <div className="intent-meta">
         <strong>{model.label}</strong>
@@ -119,9 +141,9 @@ export default function IntentPanel({ model, selection, onSelect, onChange }: In
       {model.warnings.length > 0 ? (
         <div className="warn-list">
           <h3>Domain constraints</h3>
-          {model.warnings.map((warning) => (
+          {model.warnings.map((warning, idx) => (
             <button
-              key={warning.id}
+              key={`${warning.id}_${idx}`}
               type="button"
               className={`warn warn-${warning.severity} ${warning.propKey && warning.propKey === selection ? 'warn-active' : ''}`}
               onClick={() => warning.propKey && onSelect(warning.propKey)}

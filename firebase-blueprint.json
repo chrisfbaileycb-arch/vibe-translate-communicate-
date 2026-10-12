@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Unique user ID" },
+        "email": { "type": "string", "description": "User email address" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Update timestamp" }
+      },
+      "required": ["uid", "email", "createdAt", "updatedAt"]
+    },
+    "Translation": {
+      "title": "Translation",
+      "description": "Saved translation intent model and code workflow",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Translation identifier" },
+        "userId": { "type": "string", "description": "Owner user ID" },
+        "label": { "type": "string", "description": "Human label for the model" },
+        "kind": { "type": "string", "description": "Kind of the intent model" },
+        "sourceText": { "type": "string", "description": "Source voice or text utterance" },
+        "target": { "type": "string", "description": "Target format identifier" },
+        "modelData": { "type": "string", "description": "JSON serialized IntentModel" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Update timestamp" }
+      },
+      "required": ["id", "userId", "label", "kind", "modelData", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile record"
+    },
+    "/users/{userId}/translations/{translationId}": {
+      "schema": "Translation",
+      "description": "User saved translation models and code workflows"
+    }
+  }
+}

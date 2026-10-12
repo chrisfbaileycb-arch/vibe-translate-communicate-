@@ -4,7 +4,7 @@
  */
 import { parseUtterance, parseCorrection } from './parse.ts';
 import { lint } from './lint.ts';
-import { generate, generatePreviewDoc } from './generate.ts';
+import { generate, generatePreviewDoc, exportModelAsJson } from './generate.ts';
 import { reverseFromCode } from './reverse.ts';
 import type { TargetId } from './types.ts';
 
@@ -70,5 +70,11 @@ const htmlIn = '<html><body><div style="width:240px;height:120px;background:#256
 const reversedHtml = reverseFromCode(htmlIn);
 ok(reversedHtml.renderKind === 'html', 'HTML source is rendered exactly');
 ok(reversedHtml.previewDoc.includes('hello'), 'HTML preview keeps the original markup');
+
+// 7. export semantic model as JSON
+const exported = exportModelAsJson(model);
+ok(exported.filename.endsWith('.intent.json'), 'exports with .intent.json extension');
+ok(exported.json.includes(model.kind), 'exported json contains semantic model kind');
+ok(JSON.parse(exported.json).props.length === model.props.length, 'exported json has matching props');
 
 console.log(`\n${passed} checks passed${runtime.process?.exitCode ? ' — WITH FAILURES' : ''}`);

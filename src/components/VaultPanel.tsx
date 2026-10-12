@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import type { UsageStats, VaultBlob, VaultSecret } from '../lib/vault.ts';
 import {
+  clearSessionSecret,
   clearVault,
   decryptSecret,
   encryptSecret,
@@ -9,41 +10,62 @@ import {
   loadUsage,
   maskKey,
   parseVaultFile,
+  PROVIDER_PRESETS,
+  purgeAllKeys,
   resetUsage,
+  saveSessionSecret,
   saveVault,
   serializeVault,
 } from '../lib/vault.ts';
 
 interface VaultPanelProps {
   secret: VaultSecret | null;
-  onUnlock: (secret: VaultSecret) => void;
+  isSessionOnly: boolean;
+  onUnlock: (secret: VaultSecret, sessionOnly?: boolean) => void;
   onLock: () => void;
   onForget: () => void;
   onUsageChange: (usage: UsageStats) => void;
 }
 
-/**
- * The "front door" for a bring-your-own key: it is encrypted before it is stored,
- * decrypted only in memory, and only ever sent to the endpoint its owner names.
- * Selling the product never means carrying somebody's token spend.
- */
-export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsageChange }: VaultPanelProps) {
+export default function VaultPanel({
+  secret,
+  isSessionOnly,
+  onUnlock,
+  onLock,
+  onForget,
+  onUsageChange,
+}: VaultPanelProps) {
   const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [tab, setTab] = useState<'session' | 'vault'>('session');
+
+  // Input states
+  const [selectedProvider, setSelectedProvider] = useState<string>('gemini');
+  const [apiKey, setApiKey] = useState('');
+  const [endpoint, setEndpoint] = useState(PROVIDER_PRESETS[0].endpoint);
+  const [model, setModel] = useState(PROVIDER_PRESETS[0].defaultModel);
+
+  // Vault passphrase states
   const [pass, setPass] = useState('');
   const [confirm, setConfirm] = useState('');
-  const [apiKey, setApiKey] = useState('');
-  const [endpoint, setEndpoint] = useState('https://api.openai.com/v1');
-  const [model, setModel] = useState('gpt-4o-mini');
   const [showRotate, setShowRotate] = useState(false);
   const [showReplace, setShowReplace] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  void revision; // re-reads localStorage after mutations
+  void revision;
   const stored: VaultBlob | null = loadVault();
   const usage = loadUsage();
+
+  const handleProviderSelect = (providerId: string) => {
+    setSelectedProvider(providerId);
+    const found = PROVIDER_PRESETS.find((p) => p.id === providerId);
+    if (found) {
+      setEndpoint(found.endpoint);
+      setModel(found.defaultModel);
+    }
+  };
 
   const flash = (message: string): void => {
     setNotice(message);
@@ -63,20 +85,38 @@ export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsage
     }
   };
 
+  // 1. Session-only (In-memory / SessionStorage)
+  const setSessionKey = () =>
+    wrap(async () => {
+      const cleanKey = apiKey.trim();
+      if (!cleanKey) throw new Error('Please paste your API key.');
+      const newSecret: VaultSecret = {
+        apiKey: cleanKey,
+        endpoint: endpoint.trim(),
+        model: model.trim(),
+      };
+      saveSessionSecret(newSecret);
+      setApiKey('');
+      onUnlock(newSecret, true);
+      onUsageChange(loadUsage());
+      flash('Session key activated! Stored strictly in memory/session for this work session.');
+    });
+
+  // 2. Encrypted Vault (PBKDF2 + AES-GCM)
   const createVault = () =>
     wrap(async () => {
       if (pass.length < 8) throw new Error('Use a passphrase of at least 8 characters.');
       if (pass !== confirm) throw new Error('The passphrases do not match.');
       if (!apiKey.trim()) throw new Error('Paste the API key you want to protect.');
-      const blob = await encryptSecret(pass, { apiKey: apiKey.trim(), endpoint: endpoint.trim(), model: model.trim() });
+      const newSecret = { apiKey: apiKey.trim(), endpoint: endpoint.trim(), model: model.trim() };
+      const blob = await encryptSecret(pass, newSecret);
       saveVault(blob);
-      const next = { apiKey: apiKey.trim(), endpoint: endpoint.trim(), model: model.trim() };
       setPass('');
       setConfirm('');
       setApiKey('');
-      onUnlock(next);
+      onUnlock(newSecret, false);
       onUsageChange(loadUsage());
-      flash('Key encrypted and stored. It is only readable with your passphrase.');
+      flash('Key encrypted and stored with AES-GCM. Unlocked for current session.');
     });
 
   const unlock = () =>
@@ -84,9 +124,9 @@ export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsage
       if (!stored) throw new Error('No vault on this device yet.');
       const next = await decryptSecret(pass, stored);
       setPass('');
-      onUnlock(next);
+      onUnlock(next, false);
       onUsageChange(loadUsage());
-      flash('Vault unlocked — the key lives in memory until you lock it.');
+      flash('Vault unlocked — the key lives in memory until locked or cleared.');
     });
 
   const rotatePassphrase = () =>
@@ -98,7 +138,7 @@ export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsage
       setPass('');
       setConfirm('');
       setShowRotate(false);
-      flash('Passphrase changed. The old one no longer opens this vault.');
+      flash('Passphrase changed successfully.');
     });
 
   const replaceKey = () =>
@@ -111,7 +151,7 @@ export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsage
       setPass('');
       setApiKey('');
       setShowReplace(false);
-      onUnlock(next);
+      onUnlock(next, false);
       onUsageChange(loadUsage());
       flash('Key replaced and re-encrypted.');
     });
@@ -124,7 +164,7 @@ export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsage
     a.download = 'code-translator-key.vault.json';
     a.click();
     URL.revokeObjectURL(url);
-    flash('Encrypted vault exported. Without your passphrase it is unreadable.');
+    flash('Encrypted vault exported.');
   };
 
   const importFile = (file: File) =>
@@ -132,26 +172,39 @@ export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsage
       const blob = parseVaultFile(await file.text());
       saveVault(blob);
       onForget();
-      flash('Vault imported. Unlock it with the passphrase it was created with.');
+      setTab('vault');
+      flash('Vault imported. Enter your passphrase to unlock.');
     });
 
-  const forget = () => {
+  const purgeAll = () => {
+    purgeAllKeys();
+    clearSessionSecret();
     clearVault();
     onForget();
-    flash('Vault deleted from this device.');
+    flash('All keys deleted immediately from session, memory, and local storage.');
   };
 
   return (
     <div className="vault" data-revision={revision}>
       <header className="vault-head">
-        <span className={`vault-state ${secret ? 'vault-open' : ''}`}>{secret ? 'unlocked' : stored ? 'locked' : 'no vault'}</span>
-        <span className="vault-title">Key vault · bring your own key</span>
+        <span
+          className={`vault-state ${
+            secret ? (isSessionOnly ? 'vault-session' : 'vault-open') : stored ? 'vault-locked' : ''
+          }`}
+        >
+          {secret ? (isSessionOnly ? 'session active' : 'vault unlocked') : stored ? 'locked' : 'no key'}
+        </span>
+        <span className="vault-title">Bring-Your-Own API Key</span>
       </header>
 
       {secret ? (
         <div className="vault-body">
           <div className="vault-row">
-            <span className="vault-label">API key</span>
+            <span className="vault-label">Key Status</span>
+            <span className="vault-chip">{isSessionOnly ? 'Session-Only (In-Memory)' : 'Encrypted Vault'}</span>
+          </div>
+          <div className="vault-row">
+            <span className="vault-label">API Key</span>
             <code className="vault-key">{maskKey(secret.apiKey)}</code>
           </div>
           <div className="vault-row">
@@ -174,21 +227,25 @@ export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsage
           </div>
 
           <div className="vault-actions">
+            <button type="button" className="ghost danger" onClick={purgeAll}>
+              Delete &amp; Purge Key Now
+            </button>
             <button type="button" className="ghost" onClick={onLock}>
-              Lock now
+              Lock session
             </button>
-            <button type="button" className="ghost" onClick={exportFile}>
-              Export encrypted file
-            </button>
-            <button type="button" className="ghost" onClick={() => setShowRotate((v) => !v)}>
-              Change passphrase
-            </button>
-            <button type="button" className="ghost" onClick={() => setShowReplace((v) => !v)}>
-              Replace key
-            </button>
-            <button type="button" className="ghost danger" onClick={forget}>
-              Forget vault
-            </button>
+            {!isSessionOnly && stored ? (
+              <>
+                <button type="button" className="ghost" onClick={exportFile}>
+                  Export vault file
+                </button>
+                <button type="button" className="ghost" onClick={() => setShowRotate((v) => !v)}>
+                  Change passphrase
+                </button>
+                <button type="button" className="ghost" onClick={() => setShowReplace((v) => !v)}>
+                  Replace key
+                </button>
+              </>
+            ) : null}
             <button
               type="button"
               className="ghost"
@@ -197,15 +254,30 @@ export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsage
                 onUsageChange(loadUsage());
               }}
             >
-              Reset counter
+              Reset meter
             </button>
           </div>
 
           {showReplace ? (
             <div className="vault-form">
-              <input type="password" placeholder="passphrase to re-encrypt" value={pass} onChange={(e) => setPass(e.target.value)} />
-              <input type="password" placeholder="new API key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
-              <input type="text" placeholder="endpoint (https://…/v1)" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
+              <input
+                type="password"
+                placeholder="passphrase to re-encrypt"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+              />
+              <input
+                type="password"
+                placeholder="new API key"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+              <input
+                type="text"
+                placeholder="endpoint"
+                value={endpoint}
+                onChange={(e) => setEndpoint(e.target.value)}
+              />
               <input type="text" placeholder="model" value={model} onChange={(e) => setModel(e.target.value)} />
               <button type="button" className="primary" disabled={busy} onClick={replaceKey}>
                 Replace &amp; re-encrypt
@@ -215,59 +287,182 @@ export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsage
 
           {showRotate ? (
             <div className="vault-form">
-              <input type="password" placeholder="new passphrase" value={pass} onChange={(e) => setPass(e.target.value)} />
-              <input type="password" placeholder="repeat new passphrase" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+              <input
+                type="password"
+                placeholder="new passphrase"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+              />
+              <input
+                type="password"
+                placeholder="repeat new passphrase"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+              />
               <button type="button" className="primary" disabled={busy} onClick={rotatePassphrase}>
                 Re-encrypt vault
               </button>
             </div>
           ) : null}
         </div>
-      ) : stored ? (
-        <div className="vault-body">
-          <p className="hint">
-            This device holds an encrypted vault. The passphrase never leaves your head — there is no reset link, because
-            nothing here can read it without you.
-          </p>
-          <div className="vault-form">
-            <input
-              type="password"
-              placeholder="passphrase"
-              value={pass}
-              onChange={(e) => setPass(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && void unlock()}
-            />
-            <button type="button" className="primary" disabled={busy} onClick={unlock}>
-              Unlock
-            </button>
-            <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
-              Import vault file
-            </button>
-            <button type="button" className="ghost danger" onClick={forget}>
-              Forget vault
-            </button>
-          </div>
-        </div>
       ) : (
         <div className="vault-body">
-          <p className="hint">
-            Store an API key encrypted in this browser. It is decrypted only in memory, sent only to the endpoint you name
-            here, and never touches the app's own infrastructure — so the usage runs on <b>your</b> account, not the
-            product's.
-          </p>
-          <div className="vault-form">
-            <input type="password" placeholder="choose a passphrase (min 8 chars)" value={pass} onChange={(e) => setPass(e.target.value)} />
-            <input type="password" placeholder="repeat passphrase" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-            <input type="password" placeholder="API key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
-            <input type="text" placeholder="endpoint (https://…/v1)" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
-            <input type="text" placeholder="model" value={model} onChange={(e) => setModel(e.target.value)} />
-            <button type="button" className="primary" disabled={busy} onClick={createVault}>
-              Encrypt &amp; store
+          <div className="vault-tab-bar">
+            <button
+              type="button"
+              className={`vault-tab-btn ${tab === 'session' ? 'active' : ''}`}
+              onClick={() => setTab('session')}
+            >
+              Session Key (Ephemeral)
             </button>
-            <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
-              Import vault file
+            <button
+              type="button"
+              className={`vault-tab-btn ${tab === 'vault' ? 'active' : ''}`}
+              onClick={() => setTab('vault')}
+            >
+              Encrypted Vault {stored ? '(Locked)' : '(Persistent)'}
             </button>
           </div>
+
+          {tab === 'session' ? (
+            <div className="vault-form">
+              <p className="hint">
+                Enter an API key for your active beta testing workflows. It stays strictly in frontend memory, is never
+                saved permanently to disk, and can be destroyed at any moment with one click.
+              </p>
+              <label className="vault-input-label">
+                Provider Preset
+                <select value={selectedProvider} onChange={(e) => handleProviderSelect(e.target.value)}>
+                  {PROVIDER_PRESETS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="vault-input-label">
+                API Key
+                <input
+                  type="password"
+                  placeholder="Paste your API key (e.g., AIzaSy... or sk-...)"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+              </label>
+
+              <div className="vault-grid-2">
+                <label className="vault-input-label">
+                  Endpoint URL
+                  <input
+                    type="text"
+                    placeholder="https://..."
+                    value={endpoint}
+                    onChange={(e) => setEndpoint(e.target.value)}
+                  />
+                </label>
+                <label className="vault-input-label">
+                  Model
+                  <input
+                    type="text"
+                    placeholder="model ID"
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                  />
+                </label>
+              </div>
+
+              <div className="vault-actions">
+                <button type="button" className="primary" disabled={busy} onClick={setSessionKey}>
+                  Set Key for this Session
+                </button>
+                <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
+                  Import vault file
+                </button>
+              </div>
+            </div>
+          ) : stored ? (
+            <div className="vault-form">
+              <p className="hint">
+                This browser holds an encrypted vault protected with PBKDF2-SHA256 (600,000 iterations) + AES-GCM-256. Enter
+                your passphrase to unlock.
+              </p>
+              <input
+                type="password"
+                placeholder="Enter passphrase"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && void unlock()}
+              />
+              <div className="vault-actions">
+                <button type="button" className="primary" disabled={busy} onClick={unlock}>
+                  Unlock Vault
+                </button>
+                <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
+                  Import vault file
+                </button>
+                <button type="button" className="ghost danger" onClick={purgeAll}>
+                  Delete Vault
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="vault-form">
+              <p className="hint">
+                Store your API key encrypted at rest on this device. Decrypted only in memory with your passphrase.
+              </p>
+              <label className="vault-input-label">
+                Provider Preset
+                <select value={selectedProvider} onChange={(e) => handleProviderSelect(e.target.value)}>
+                  {PROVIDER_PRESETS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <input
+                type="password"
+                placeholder="Choose passphrase (min 8 characters)"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+              />
+              <input
+                type="password"
+                placeholder="Repeat passphrase"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+              />
+              <input
+                type="password"
+                placeholder="API key"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+              <div className="vault-grid-2">
+                <input
+                  type="text"
+                  placeholder="endpoint"
+                  value={endpoint}
+                  onChange={(e) => setEndpoint(e.target.value)}
+                />
+                <input
+                  type="text"
+                  placeholder="model"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                />
+              </div>
+              <div className="vault-actions">
+                <button type="button" className="primary" disabled={busy} onClick={createVault}>
+                  Encrypt &amp; Store
+                </button>
+                <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
+                  Import vault file
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -285,10 +480,6 @@ export default function VaultPanel({ secret, onUnlock, onLock, onForget, onUsage
 
       {notice ? <p className="vault-notice">{notice}</p> : null}
       {error ? <p className="error-line">{error}</p> : null}
-      <p className="hint">
-        Encrypted at rest with PBKDF2-SHA256 (600k iterations) → AES-GCM-256. Keep the passphrase; if it is lost, the key
-        is unrecoverable from this vault (re-import from your provider instead).
-      </p>
     </div>
   );
 }

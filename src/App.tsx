@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { User } from 'firebase/auth';
 import type { EngineConfig, IntentModel, TargetId } from './lib/types.ts';
 import { cloneModel } from './lib/types.ts';
 import { lint } from './lib/lint.ts';
@@ -7,7 +8,24 @@ import { reverseFromCode, type ReverseResult } from './lib/reverse.ts';
 import { createEngine } from './lib/engine.ts';
 import { useSpeech } from './lib/useSpeech.ts';
 import type { UsageStats, VaultSecret } from './lib/vault.ts';
-import { bumpUsage, loadUsage } from './lib/vault.ts';
+import {
+  bumpUsage,
+  clearSessionSecret,
+  loadSessionSecret,
+  loadUsage,
+  purgeAllKeys,
+} from './lib/vault.ts';
+import {
+  auth,
+  loginWithGoogle,
+  logoutUser,
+  onAuthStateChanged,
+  saveTranslationWorkflow,
+  subscribeToUserTranslations,
+  deleteTranslationWorkflow,
+  testConnection,
+  type SavedTranslationRecord,
+} from './lib/firebase.ts';
 import MicButton from './components/MicButton.tsx';
 import VaultPanel from './components/VaultPanel.tsx';
 import IntentPanel from './components/IntentPanel.tsx';
@@ -44,7 +62,6 @@ function loadEngineConfig(): EngineConfig {
     const raw = localStorage.getItem('ct.engine');
     if (raw) {
       const parsed = JSON.parse(raw) as EngineConfig & { apiKey?: string };
-      // Never keep a key here: the vault is the only place a key may rest.
       return { id: parsed.id === 'remote' ? 'remote' : 'local', endpoint: parsed.endpoint, model: parsed.model };
     }
   } catch {
@@ -53,26 +70,88 @@ function loadEngineConfig(): EngineConfig {
   return { id: 'local' };
 }
 
+interface LogItem {
+  id: string;
+  text: string;
+}
+
 export default function App() {
   const [mode, setMode] = useState<Mode>('speak');
   const [target, setTarget] = useState<TargetId>('nextjs');
   const [model, setModel] = useState<IntentModel | null>(null);
   const [selection, setSelection] = useState<string | null>(null);
   const [history, setHistory] = useState<IntentModel[]>([]);
-  const [log, setLog] = useState<string[]>([]);
+  const [log, setLog] = useState<LogItem[]>([]);
+  const logCounterRef = useRef(0);
   const [transcript, setTranscript] = useState('');
   const [reverseCode, setReverseCode] = useState('');
   const [reverse, setReverse] = useState<ReverseResult | null>(null);
   const [engineConfig, setEngineConfig] = useState<EngineConfig>(loadEngineConfig);
   const [busy, setBusy] = useState(false);
-  const [vaultSecret, setVaultSecret] = useState<VaultSecret | null>(null);
+
+  // Session vs Vault API key
+  const [vaultSecret, setVaultSecret] = useState<VaultSecret | null>(loadSessionSecret);
+  const [isSessionOnly, setIsSessionOnly] = useState<boolean>(() => loadSessionSecret() !== null);
   const [usage, setUsage] = useState<UsageStats>(loadUsage);
   const autoLockRef = useRef<number | null>(null);
 
+  // Firebase auth & cloud state
+  const [user, setUser] = useState<User | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [savedWorkflows, setSavedWorkflows] = useState<SavedTranslationRecord[]>([]);
+  const [firebaseOnline, setFirebaseOnline] = useState(false);
+
   const pushLog = useCallback((message: string) => {
     const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    setLog((entries) => [`${stamp} — ${message}`, ...entries].slice(0, 12));
+    logCounterRef.current += 1;
+    const item: LogItem = {
+      id: `log_${Date.now()}_${logCounterRef.current}`,
+      text: `${stamp} — ${message}`,
+    };
+    setLog((entries) => [item, ...entries].slice(0, 16));
   }, []);
+
+  // 1. Initial Firestore connection test
+  useEffect(() => {
+    let mounted = true;
+    testConnection()
+      .then((ok) => {
+        if (!mounted) return;
+        setFirebaseOnline(ok);
+        if (ok) pushLog('Firebase Firestore connected.');
+      })
+      .catch(() => {
+        if (mounted) setFirebaseOnline(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [pushLog]);
+
+  // 2. Firebase Auth state listener
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (currentUser) {
+        pushLog(`Signed in as ${currentUser.email || currentUser.displayName}`);
+      }
+    });
+    return () => unsub();
+  }, [pushLog]);
+
+  // 3. Real-time subscriber to user saved translation workflows
+  useEffect(() => {
+    if (!user) {
+      setSavedWorkflows([]);
+      return;
+    }
+    const unsub = subscribeToUserTranslations(
+      user.uid,
+      (list) => setSavedWorkflows(list),
+      (err) => pushLog(`Firestore sync notice: ${(err as Error).message}`),
+    );
+    return () => unsub();
+  }, [user, pushLog]);
 
   const armAutoLock = useCallback(() => {
     if (autoLockRef.current) window.clearTimeout(autoLockRef.current);
@@ -81,6 +160,8 @@ export default function App() {
         if (current) pushLog('Key vault auto-locked after 15 minutes idle.');
         return null;
       });
+      setIsSessionOnly(false);
+      clearSessionSecret();
     }, 15 * 60 * 1000);
   }, [pushLog]);
 
@@ -156,7 +237,7 @@ export default function App() {
     [model, pushLog],
   );
 
-  // Reverse mode: code -> semantic model + visual, on a small debounce.
+  // Reverse mode: code -> semantic model + visual, on debounce
   useEffect(() => {
     if (mode !== 'reverse') return;
     const timer = setTimeout(() => {
@@ -198,10 +279,76 @@ export default function App() {
     const next = { ...engineConfig, ...patch };
     setEngineConfig(next);
     try {
-      // Only non-secret settings are persisted outside the vault.
       localStorage.setItem('ct.engine', JSON.stringify({ id: next.id, endpoint: next.endpoint, model: next.model }));
     } catch {
       /* ignore */
+    }
+  };
+
+  // Google Login / Logout handlers
+  const handleSignIn = async () => {
+    setAuthBusy(true);
+    try {
+      const u = await loginWithGoogle();
+      pushLog(`Logged in with Google: ${u.email}`);
+    } catch (err) {
+      pushLog(`Login failed: ${(err as Error).message}`);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    setAuthBusy(true);
+    try {
+      await logoutUser();
+      pushLog('Signed out from Firebase.');
+    } catch (err) {
+      pushLog(`Sign out failed: ${(err as Error).message}`);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  // Save current workflow to Firebase
+  const handleSaveToFirebase = async () => {
+    if (!user) {
+      pushLog('Sign in with Google to save workflows to Firebase.');
+      return;
+    }
+    if (!model) {
+      pushLog('No translation model to save. Speak or enter an idea first.');
+      return;
+    }
+    try {
+      await saveTranslationWorkflow(user.uid, model, target);
+      pushLog(`Saved workflow "${model.label}" to your Firebase account!`);
+    } catch (err) {
+      pushLog(`Cloud save failed: ${(err as Error).message}`);
+    }
+  };
+
+  // Load a workflow from Firebase
+  const handleLoadWorkflow = (record: SavedTranslationRecord) => {
+    try {
+      const loadedModel = JSON.parse(record.modelData) as IntentModel;
+      setModel(loadedModel);
+      if (record.target) setTarget(record.target);
+      setSelection(null);
+      pushLog(`Loaded "${record.label}" from Firebase (${record.target || 'model'}).`);
+    } catch (err) {
+      pushLog(`Failed to load workflow: ${(err as Error).message}`);
+    }
+  };
+
+  // Delete a workflow from Firebase
+  const handleDeleteWorkflow = async (record: SavedTranslationRecord) => {
+    if (!user) return;
+    try {
+      await deleteTranslationWorkflow(user.uid, record.id);
+      pushLog(`Deleted "${record.label}" from Firebase.`);
+    } catch (err) {
+      pushLog(`Delete error: ${(err as Error).message}`);
     }
   };
 
@@ -237,6 +384,29 @@ export default function App() {
         </label>
 
         <div className="topbar-actions">
+          {user ? (
+            <div className="auth-box">
+              <span className="user-chip">
+                <span className="user-avatar">{user.displayName ? user.displayName[0].toUpperCase() : 'U'}</span>
+                <span>{user.email || user.displayName}</span>
+              </span>
+              <button type="button" className="ghost" onClick={handleSaveToFirebase} disabled={!model}>
+                Save to Cloud
+              </button>
+              <button type="button" className="ghost" onClick={handleSignOut} disabled={authBusy}>
+                Sign Out
+              </button>
+            </div>
+          ) : (
+            <div className="auth-box">
+              <button type="button" className="primary" onClick={handleSignIn} disabled={authBusy}>
+                {authBusy ? 'Connecting…' : 'Sign in with Google'}
+              </button>
+            </div>
+          )}
+
+          <span className="backend-tag">{firebaseOnline ? 'Firebase: Active' : 'Firebase'}</span>
+
           <button type="button" className="ghost" onClick={undo} disabled={history.length === 0}>
             Undo
           </button>
@@ -314,7 +484,7 @@ export default function App() {
                     onChange={(e) => saveEngineConfig({ id: e.target.value as EngineConfig['id'] })}
                   >
                     <option value="local">Local rules (offline)</option>
-                    <option value="remote">AI endpoint</option>
+                    <option value="remote">AI endpoint (Custom / Gemini / OpenAI)</option>
                   </select>
                 </label>
                 {engineConfig.id === 'remote' ? (
@@ -323,7 +493,7 @@ export default function App() {
                       <span>Endpoint</span>
                       <input
                         type="text"
-                        placeholder="https://api.openai.com/v1"
+                        placeholder="https://..."
                         value={engineConfig.endpoint ?? ''}
                         onChange={(e) => saveEngineConfig({ endpoint: e.target.value })}
                       />
@@ -332,7 +502,7 @@ export default function App() {
                       <span>Model</span>
                       <input
                         type="text"
-                        placeholder="gpt-4o-mini"
+                        placeholder="model ID"
                         value={engineConfig.model ?? ''}
                         onChange={(e) => saveEngineConfig({ model: e.target.value })}
                       />
@@ -341,30 +511,71 @@ export default function App() {
                 ) : null}
               </div>
               <p className="hint">
-                Local engine: deterministic, works offline. AI engine: any OpenAI-compatible endpoint — the key comes from
-                the vault below, its output is still run through the local constraint linter, and every request is billed
-                to whoever owns that key.
+                Deterministic rules run locally and offline. AI engine uses the session key or encrypted vault below to
+                contact Google Gemini, OpenAI, or your custom endpoint. Output always passes through local semantic linting.
               </p>
             </details>
           </section>
 
           <VaultPanel
             secret={vaultSecret}
-            onUnlock={(next) => {
+            isSessionOnly={isSessionOnly}
+            onUnlock={(next, sessionOnly) => {
               setVaultSecret(next);
+              setIsSessionOnly(!!sessionOnly);
               saveEngineConfig({ id: 'remote', endpoint: next.endpoint, model: next.model });
               armAutoLock();
+              pushLog(sessionOnly ? 'Session API key activated.' : 'Encrypted vault unlocked.');
             }}
             onLock={() => {
               setVaultSecret(null);
-              pushLog('Key vault locked — the key left memory.');
+              setIsSessionOnly(false);
+              clearSessionSecret();
+              saveEngineConfig({ id: 'local' });
+              pushLog('Session locked — API key removed from memory.');
             }}
-            onForget={() => setVaultSecret(null)}
+            onForget={() => {
+              setVaultSecret(null);
+              setIsSessionOnly(false);
+              purgeAllKeys();
+              saveEngineConfig({ id: 'local' });
+              pushLog('API key and vaults purged immediately.');
+            }}
             onUsageChange={setUsage}
           />
+
+          {user && savedWorkflows.length > 0 ? (
+            <section className="panel cloud-panel">
+              <header className="panel-head">
+                <h2>Cloud Saved Workflows</h2>
+                <span className="chip">{savedWorkflows.length} saved</span>
+              </header>
+              <div className="workflow-list">
+                {savedWorkflows.map((item) => (
+                  <div key={item.id} className="workflow-item">
+                    <div>
+                      <div className="workflow-title">{item.label}</div>
+                      <div className="workflow-sub">
+                        Target: {item.target || 'generic'} · {new Date(item.updatedAt).toLocaleDateString()}
+                      </div>
+                    </div>
+                    <div className="workflow-btns">
+                      <button type="button" className="ghost" onClick={() => handleLoadWorkflow(item)}>
+                        Load
+                      </button>
+                      <button type="button" className="ghost danger" onClick={() => handleDeleteWorkflow(item)}>
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           <p className="hint usage-line">
-            {usage.requests} request{usage.requests === 1 ? '' : 's'} on the vault key · ≈
-            {Math.round((usage.promptChars + usage.outputChars) / 4).toLocaleString()} tokens · your key, your bill.
+            {usage.requests} request{usage.requests === 1 ? '' : 's'} on key · ≈
+            {Math.round((usage.promptChars + usage.outputChars) / 4).toLocaleString()} tokens · your key, your workflows.
           </p>
 
           <IntentPanel model={model} selection={selection} onSelect={setSelection} onChange={handlePropChange} />
@@ -374,9 +585,9 @@ export default function App() {
               <h2>Translator log</h2>
             </header>
             <ul>
-              {log.length === 0 ? <li className="empty">Interpretations and corrections appear here.</li> : null}
+              {log.length === 0 ? <li className="empty">Interpretations, corrections, and cloud logs appear here.</li> : null}
               {log.map((entry) => (
-                <li key={entry}>{entry}</li>
+                <li key={entry.id}>{entry.text}</li>
               ))}
             </ul>
           </section>
@@ -391,6 +602,7 @@ export default function App() {
               lineMap={codeView.lineMap}
               selection={selection}
               onSelect={setSelection}
+              model={model}
             />
           ) : (
             <section className="panel">
