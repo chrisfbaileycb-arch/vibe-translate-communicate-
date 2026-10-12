@@ -71,6 +71,20 @@ const reversedHtml = reverseFromCode(htmlIn);
 ok(reversedHtml.renderKind === 'html', 'HTML source is rendered exactly');
 ok(reversedHtml.previewDoc.includes('hello'), 'HTML preview keeps the original markup');
 
+// 6b. reverse React/TSX component (Hero section)
+const heroCode = [
+  '"use client"',
+  'export function Hero({ eyebrow = "Innovate Without Limits", ctaLabel = "Explore Now" }) {',
+  '  return <section className="h-[600px] pt-40"><h1>Title</h1></section>',
+  '}'
+].join('\n');
+const reversedHero = reverseFromCode(heroCode);
+ok(reversedHero.renderKind === 'html', 'React TSX component renders as live HTML');
+ok(reversedHero.model.label === 'Hero', 'detects Hero component name');
+ok(reversedHero.model.props.find((p) => p.key === 'eyebrow')?.value === 'Innovate Without Limits', 'extracts eyebrow default prop');
+ok(reversedHero.model.props.find((p) => p.key === 'ctaLabel')?.value === 'Explore Now', 'extracts ctaLabel default prop');
+ok(reversedHero.previewDoc.includes('tailwindcss'), 'embeds Tailwind CSS runtime in preview');
+
 // 7. export semantic model as JSON
 const exported = exportModelAsJson(model);
 ok(exported.filename.endsWith('.intent.json'), 'exports with .intent.json extension');

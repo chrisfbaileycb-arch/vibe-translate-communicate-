@@ -31,8 +31,9 @@ import VaultPanel from './components/VaultPanel.tsx';
 import IntentPanel from './components/IntentPanel.tsx';
 import CodePanel from './components/CodePanel.tsx';
 import PreviewPanel from './components/PreviewPanel.tsx';
+import CoverLanding from './components/CoverLanding.tsx';
 
-type Mode = 'speak' | 'reverse';
+type Mode = 'cover' | 'speak' | 'reverse';
 
 const TARGETS: { id: TargetId; label: string }[] = [
   { id: 'nextjs', label: 'Next.js / React (TSX)' },
@@ -49,6 +50,111 @@ const QUICK_PHRASES = [
   'Make it wider',
   'A blue button that says "Save"',
 ];
+
+const DEFAULT_HERO_CODE = `"use client"
+
+import { ChevronRight } from "lucide-react"
+import { Button } from "@/components/ui/button"
+
+interface HeroProps {
+  eyebrow?: string
+  title: string
+  subtitle: string
+  ctaLabel?: string
+  ctaHref?: string
+}
+
+export function Hero({
+  eyebrow = "Innovate Without Limits",
+  title,
+  subtitle,
+  ctaLabel = "Explore Now",
+  ctaHref = "#",
+}: HeroProps) {
+  return (
+    <section
+      id="hero"
+      className="relative mx-auto w-full pt-40 px-6 text-center md:px-8 
+      min-h-[calc(100vh-40px)] overflow-hidden 
+      bg-[linear-gradient(to_bottom,#fff,#ffffff_50%,#e8e8e8_88%)]  
+      dark:bg-[linear-gradient(to_bottom,#000,#0000_30%,#898e8e_78%,#ffffff_99%_50%)] 
+      rounded-b-xl"
+    >
+      {/* Grid BG */}
+      <div
+        className="absolute -z-10 inset-0 opacity-80 h-[600px] w-full 
+        bg-[linear-gradient(to_right,#f0f0f0_1px,transparent_1px),linear-gradient(to_bottom,#f0f0f0_1px,transparent_1px)] 
+        dark:bg-[linear-gradient(to_right,#333_1px,transparent_1px),linear-gradient(to_bottom,#333_1px,transparent_1px)]
+        bg-[size:6rem_5rem] 
+        [mask-image:radial-gradient(ellipse_80%_50%_at_50%_0%,#000_70%,transparent_110%)]"
+      />
+
+      {/* Radial Accent */}
+      <div
+        className="absolute left-1/2 top-[calc(100%-90px)] lg:top-[calc(100%-150px)] 
+        h-[500px] w-[700px] md:h-[500px] md:w-[1100px] lg:h-[750px] lg:w-[140%] 
+        -translate-x-1/2 rounded-[100%] border-[#B48CDE] bg-white dark:bg-black 
+        bg-[radial-gradient(closest-side,#fff_82%,#000000)] 
+        dark:bg-[radial-gradient(closest-side,#000_82%,#ffffff)] 
+        animate-fade-up"
+      />
+
+      {/* Eyebrow */}
+      {eyebrow && (
+        <a href="#" className="group">
+          <span
+            className="text-sm text-gray-600 dark:text-gray-400 font-geist mx-auto px-5 py-2 
+            bg-gradient-to-tr from-zinc-300/5 via-gray-400/5 to-transparent  
+            border-[2px] border-gray-300/20 dark:border-white/5 
+            rounded-3xl w-fit tracking-tight uppercase flex items-center justify-center"
+          >
+            {eyebrow}
+            <ChevronRight className="inline w-4 h-4 ml-2 transition-transform duration-300 group-hover:translate-x-1" />
+          </span>
+        </a>
+      )}
+
+      {/* Title */}
+      <h1
+        className="animate-fade-in -translate-y-4 text-balance 
+        bg-gradient-to-br from-black from-30% to-black/40 
+        bg-clip-text py-6 text-5xl font-semibold leading-none tracking-tighter 
+        text-transparent opacity-0 sm:text-6xl md:text-7xl lg:text-8xl 
+        dark:from-white dark:to-white/40"
+      >
+        {title}
+      </h1>
+
+      {/* Subtitle */}
+      <p
+        className="animate-fade-in mb-12 -translate-y-4 text-balance 
+        text-lg tracking-tight text-gray-600 dark:text-gray-400 
+        opacity-0 md:text-xl"
+      >
+        {subtitle}
+      </p>
+
+      {/* CTA */}
+      {ctaLabel && (
+        <div className="flex justify-center">
+          <Button
+            asChild
+            className="mt-[-20px] w-fit md:w-52 z-20 font-geist tracking-tighter text-center text-lg"
+          >
+            <a href={ctaHref}>{ctaLabel}</a>
+          </Button>
+        </div>
+      )}
+
+      {/* Bottom Fade */}
+      <div
+        className="animate-fade-up relative mt-32 opacity-0 [perspective:2000px] 
+        after:absolute after:inset-0 after:z-50 
+        after:[background:linear-gradient(to_top,hsl(var(--background))_10%,transparent)]"
+      />
+    </section>
+  )
+}`;
 
 const PLACEHOLDER_DOC = `<!doctype html>
 <html><head><meta charset="utf-8"><style>
@@ -76,7 +182,7 @@ interface LogItem {
 }
 
 export default function App() {
-  const [mode, setMode] = useState<Mode>('speak');
+  const [mode, setMode] = useState<Mode>('cover');
   const [target, setTarget] = useState<TargetId>('nextjs');
   const [model, setModel] = useState<IntentModel | null>(null);
   const [selection, setSelection] = useState<string | null>(null);
@@ -84,7 +190,7 @@ export default function App() {
   const [log, setLog] = useState<LogItem[]>([]);
   const logCounterRef = useRef(0);
   const [transcript, setTranscript] = useState('');
-  const [reverseCode, setReverseCode] = useState('');
+  const [reverseCode, setReverseCode] = useState(DEFAULT_HERO_CODE);
   const [reverse, setReverse] = useState<ReverseResult | null>(null);
   const [engineConfig, setEngineConfig] = useState<EngineConfig>(loadEngineConfig);
   const [busy, setBusy] = useState(false);
@@ -355,15 +461,25 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">&lt;/&gt;</span>
+        <div
+          className="brand"
+          onClick={() => setMode('cover')}
+          role="button"
+          tabIndex={0}
+          style={{ cursor: 'pointer' }}
+          title="Return to LinguaCode cover page"
+        >
+          <span className="brand-mark">&lt;LC&gt;</span>
           <div>
-            <h1>Code Translator</h1>
-            <p>speech → semantic model → code → visual proof</p>
+            <h1>LinguaCode</h1>
+            <p>vibe-translate-communicate</p>
           </div>
         </div>
 
         <div className="mode-toggle" role="tablist">
+          <button type="button" className={mode === 'cover' ? 'on' : ''} onClick={() => setMode('cover')}>
+            Cover
+          </button>
           <button type="button" className={mode === 'speak' ? 'on' : ''} onClick={() => setMode('speak')}>
             Speak → Code
           </button>
@@ -372,16 +488,18 @@ export default function App() {
           </button>
         </div>
 
-        <label className="target-picker">
-          <span>Target</span>
-          <select value={target} onChange={(e) => setTarget(e.target.value as TargetId)}>
-            {TARGETS.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        {mode !== 'cover' ? (
+          <label className="target-picker">
+            <span>Target</span>
+            <select value={target} onChange={(e) => setTarget(e.target.value as TargetId)}>
+              {TARGETS.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
 
         <div className="topbar-actions">
           {user ? (
@@ -414,8 +532,18 @@ export default function App() {
         </div>
       </header>
 
-      <main className="layout">
-        <aside className="col-left">
+      {mode === 'cover' ? (
+        <CoverLanding
+          heroCode={DEFAULT_HERO_CODE}
+          onLaunch={(initial) => setMode(initial || 'speak')}
+          onLoadHeroIntoReverse={() => {
+            setReverseCode(DEFAULT_HERO_CODE);
+            setMode('reverse');
+          }}
+        />
+      ) : (
+        <main className="layout">
+          <aside className="col-left">
           <section className="panel input-panel">
             <header className="panel-head">
               <h2>0 · Input</h2>
@@ -465,13 +593,42 @@ export default function App() {
                 </div>
               </>
             ) : (
-              <textarea
-                className="code-input"
-                value={reverseCode}
-                placeholder={'Paste HTML, JSX, Python or TypeScript here.\nIt gets rendered and the dimensions inside it become editable nodes.'}
-                onChange={(e) => setReverseCode(e.target.value)}
-                spellCheck={false}
-              />
+              <>
+                <textarea
+                  className="code-input"
+                  value={reverseCode}
+                  placeholder={'Paste HTML, JSX, Python or TypeScript here.\nIt gets rendered and the dimensions inside it become editable nodes.'}
+                  onChange={(e) => setReverseCode(e.target.value)}
+                  spellCheck={false}
+                />
+                <div className="quick-row">
+                  <button
+                    type="button"
+                    className="chip-button"
+                    onClick={() => setReverseCode(DEFAULT_HERO_CODE)}
+                  >
+                    Hero Component (TSX)
+                  </button>
+                  <button
+                    type="button"
+                    className="chip-button"
+                    onClick={() =>
+                      setReverseCode(
+                        ['class Table:', '    top_width = 48', '    leg_height = 29', '    top_thickness = 1.5', '    leg_count = 4'].join('\n'),
+                      )
+                    }
+                  >
+                    Table Class (Python)
+                  </button>
+                  <button
+                    type="button"
+                    className="chip-button"
+                    onClick={() => setReverseCode('')}
+                  >
+                    Clear Code
+                  </button>
+                </div>
+              </>
             )}
 
             <details className="engine-box">
@@ -616,6 +773,7 @@ export default function App() {
           <PreviewPanel doc={previewDoc} selection={selection} onSelect={setSelection} />
         </div>
       </main>
+      )}
     </div>
   );
 }
