@@ -1,5 +1,7 @@
 import type { ConstraintWarning, IntentModel } from './types.ts';
 import { propNumber } from './types.ts';
+import { classifyCommand } from './safety.ts';
+import { topoOrder, WORKFLOW_KIND } from './workflow.ts';
 
 /**
  * Layer 1: the Domain Sanity Linter.
@@ -154,10 +156,43 @@ function lintGeneric(m: IntentModel, out: ConstraintWarning[]): void {
   }
 }
 
+function lintWorkflow(m: IntentModel, out: ConstraintWarning[]): void {
+  const graph = m.workflow;
+  if (!graph) return;
+  if (!graph.nodes.some((n) => n.type === 'trigger')) {
+    push(out, 'workflow.no-trigger', 'warn', 'This workflow has no trigger — nothing says when it runs.', undefined, 'Start with "when …" or "every night …"');
+  }
+  const { order, cyclic } = topoOrder(graph);
+  if (cyclic) push(out, 'workflow.cycle', 'error', 'The graph has a cycle, so it is not a DAG and would never finish.');
+
+  let validated = false;
+  for (const node of order) {
+    if (node.type === 'validator') validated = true;
+    if (!node.command) continue;
+    const safety = classifyCommand(node.command);
+    if (safety.level === 'destructive') {
+      push(
+        out,
+        `workflow.${node.id}.destructive`,
+        'error',
+        `"${node.label}" is destructive: ${safety.reasons.filter((r) => r !== 'read-only').join('; ')}.`,
+        node.id,
+        validated ? 'Generated script asks for confirmation (LC_CONFIRM=yes) first' : 'Add a validator step before it, e.g. "then check the backup exists"',
+      );
+    } else if (safety.level === 'caution') {
+      push(out, `workflow.${node.id}.caution`, 'warn', `"${node.label}" writes files or calls the network: ${safety.reasons.join('; ')}.`, node.id);
+    }
+    if (node.command.startsWith('echo "TODO')) {
+      push(out, `workflow.${node.id}.unmapped`, 'info', `Could not map "${node.label}" to a command — edit it in the semantic layer.`, node.id);
+    }
+  }
+}
+
 const KIND_LINTERS: Record<string, (m: IntentModel, out: ConstraintWarning[]) => void> = {
   'furniture/table': lintTable,
   'furniture/chair': lintTable,
   'ui/button': lintButton,
+  [WORKFLOW_KIND]: lintWorkflow,
 };
 
 export function lint(model: IntentModel): ConstraintWarning[] {

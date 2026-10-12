@@ -1,9 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { WorkflowGraph } from '../lib/types.ts';
+import WorkflowCanvas, { SafetyInspector } from './WorkflowCanvas.tsx';
 
 interface PreviewPanelProps {
   doc: string;
   selection: string | null;
   onSelect: (key: string | null) => void;
+  /** When set, the panel offers the Workflow Canvas next to the scratch render. */
+  workflow?: WorkflowGraph | null;
+  /** Show the shell Safety & Flag Inspector under the canvas. */
+  showSafety?: boolean;
 }
 
 /**
@@ -41,9 +47,11 @@ const BINDING_SCRIPT = `
 <\/script>
 `;
 
-export default function PreviewPanel({ doc, selection, onSelect }: PreviewPanelProps) {
+export default function PreviewPanel({ doc, selection, onSelect, workflow, showSafety }: PreviewPanelProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [revision, setRevision] = useState(0);
+  const [view, setView] = useState<'canvas' | 'render'>('canvas');
+  const showCanvas = Boolean(workflow) && view === 'canvas';
 
   const srcDoc = useMemo(() => {
     const injected = doc.includes('</body>') ? doc.replace('</body>', `${BINDING_SCRIPT}\n</body>`) : `${doc}\n${BINDING_SCRIPT}`;
@@ -62,28 +70,51 @@ export default function PreviewPanel({ doc, selection, onSelect }: PreviewPanelP
 
   useEffect(() => {
     frameRef.current?.contentWindow?.postMessage({ source: 'ct-app', type: 'highlight', nodeId: selection }, '*');
-  }, [selection, srcDoc, revision]);
+  }, [selection, srcDoc, revision, showCanvas]);
 
   return (
     <section className="panel preview-panel">
       <header className="panel-head">
-        <h2>4 · Visual verifier</h2>
-        <span className="chip url-chip">http://localhost:3000/preview</span>
-        <div className="panel-actions">
-          <button type="button" className="ghost" onClick={() => setRevision((r) => r + 1)}>
-            Re-render
-          </button>
-        </div>
+        <h2>4 · {showCanvas ? 'Workflow canvas' : 'Visual verifier'}</h2>
+        {workflow ? (
+          <div className="view-toggle" role="tablist" aria-label="Preview mode">
+            <button type="button" role="tab" aria-selected={view === 'canvas'} className={view === 'canvas' ? 'on' : ''} onClick={() => setView('canvas')}>
+              Canvas
+            </button>
+            <button type="button" role="tab" aria-selected={view === 'render'} className={view === 'render' ? 'on' : ''} onClick={() => setView('render')}>
+              Render
+            </button>
+          </div>
+        ) : (
+          <span className="chip url-chip">http://localhost:3000/preview</span>
+        )}
+        {!showCanvas ? (
+          <div className="panel-actions">
+            <button type="button" className="ghost" onClick={() => setRevision((r) => r + 1)}>
+              Re-render
+            </button>
+          </div>
+        ) : null}
       </header>
-      <iframe
-        key={revision}
-        ref={frameRef}
-        className="preview-frame"
-        title="Scratch render"
-        sandbox="allow-scripts"
-        srcDoc={srcDoc}
-      />
-      <p className="preview-foot">Click any part of the render to select its source node — the matching code lines light up.</p>
+      {showCanvas && workflow ? (
+        <>
+          <WorkflowCanvas graph={workflow} selection={selection} onSelect={onSelect} />
+          {showSafety ? <SafetyInspector graph={workflow} selection={selection} onSelect={onSelect} /> : null}
+          <p className="preview-foot">Click a node to light up its code lines and semantic property — or click a code line to find its node.</p>
+        </>
+      ) : (
+        <>
+          <iframe
+            key={revision}
+            ref={frameRef}
+            className="preview-frame"
+            title="Scratch render"
+            sandbox="allow-scripts"
+            srcDoc={srcDoc}
+          />
+          <p className="preview-foot">Click any part of the render to select its source node — the matching code lines light up.</p>
+        </>
+      )}
     </section>
   );
 }

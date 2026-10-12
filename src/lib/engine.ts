@@ -1,7 +1,15 @@
-import type { EngineConfig, IntentModel } from './types.ts';
+import type { EngineConfig, IntentModel, TargetId, WorkflowEdge, WorkflowNode } from './types.ts';
 import { cloneModel, newId } from './types.ts';
 import { lint } from './lint.ts';
-import { parseUtterance, type ParseResult } from './parse.ts';
+import { parseCorrection, parseUtterance, type ParseResult } from './parse.ts';
+import {
+  appendWorkflowStep,
+  buildWorkflowModel,
+  isWorkflowTarget,
+  looksLikeWorkflow,
+  normalizeGraph,
+  workflowModel,
+} from './workflow.ts';
 
 /**
  * The translator engines.
@@ -14,7 +22,13 @@ export interface TranslatorEngine {
   id: string;
   label: string;
   describe: string;
-  translate(text: string, current: IntentModel | null, selection: string | null): Promise<ParseResult>;
+  /** `target` picks the output family: UI schema (IntentModel props) or a workflow DAG. */
+  translate(text: string, current: IntentModel | null, selection: string | null, target?: TargetId): Promise<ParseResult>;
+}
+
+function workflowResult(model: IntentModel, message: string, selection: string | null = null): ParseResult {
+  model.warnings = lint(model);
+  return { model, selection, message, changedKeys: model.props.map((p) => p.key) };
 }
 
 export class LocalRuleEngine implements TranslatorEngine {
@@ -22,7 +36,21 @@ export class LocalRuleEngine implements TranslatorEngine {
   label = 'Local rules (offline)';
   describe = 'Deterministic parser + domain constraints. No network, instant, predictable.';
 
-  async translate(text: string, current: IntentModel | null, selection: string | null): Promise<ParseResult> {
+  async translate(text: string, current: IntentModel | null, selection: string | null, target?: TargetId): Promise<ParseResult> {
+    if (current?.workflow) {
+      const appended = appendWorkflowStep(cloneModel(current), text.trim());
+      if (appended) {
+        const added = appended.workflow!.nodes[appended.workflow!.nodes.length - 1];
+        appended.updatedAt = Date.now();
+        return workflowResult(appended, `Added ${added.type} step "${added.label}".`, added.id);
+      }
+      const correction = parseCorrection(text.trim(), current, selection);
+      if (correction) return correction;
+    }
+    if (isWorkflowTarget(target) || looksLikeWorkflow(text)) {
+      const model = buildWorkflowModel(text.trim());
+      return workflowResult(model, `Interpreted as a ${model.workflow!.nodes.length}-node workflow.`);
+    }
     return parseUtterance(text, current, selection);
   }
 }
@@ -42,6 +70,50 @@ Rules:
 - Also return {"notes": ["..."]} listing ambiguity or ergonomic risks you noticed.
 Return ONLY JSON.`;
 
+const WORKFLOW_PROMPT = `You are the semantic layer of a voice-to-workflow compiler.
+Convert the user's utterance into a workflow DAG. Never return prose.
+Schema:
+{
+  "label": "short pipeline name",
+  "nodes": [{ "id": "step.1", "type": "trigger | validator | transform | action", "label": "human step name",
+              "command": "single POSIX sh command (omit for triggers)", "detail": "cron expression, event name, etc.",
+              "destination": "terminal | db | webhook | file" }],
+  "edges": [{ "from": "step.1", "to": "step.2" }],
+  "notes": ["risks or ambiguity"]
+}
+Rules:
+- Start with exactly one trigger (mic, event, cron). Put a validator before any destructive step.
+- Prefer portable POSIX commands. Never invent credentials; use $ENV_VARS.
+- If an existing workflow is given, return the FULL updated graph and change only what the user asked.
+Return ONLY JSON.`;
+
+/** Pulls the first JSON object out of a reply that may be wrapped in prose or fences. */
+export function extractJson(raw: string): unknown {
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start === -1 || end <= start) throw new Error('AI endpoint did not return JSON.');
+  return JSON.parse(raw.slice(start, end + 1));
+}
+
+export function isOpenRouterEndpoint(endpoint: string): boolean {
+  return /(^|\/\/)(?:[\w-]+\.)?openrouter\.ai\b/.test(endpoint);
+}
+
+/** Standard OpenAI-style auth, plus OpenRouter's app attribution headers when routing through it. */
+export function chatHeaders(endpoint: string, apiKey: string): Record<string, string> {
+  const headers: Record<string, string> = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
+  if (isOpenRouterEndpoint(endpoint)) {
+    headers['HTTP-Referer'] = 'https://linguacode.app';
+    headers['X-Title'] = 'LinguaCode';
+  }
+  return headers;
+}
+
+/** Hugging Face's router is OpenAI-compatible, but not every routed provider honours response_format. */
+export function isHuggingFaceEndpoint(endpoint: string): boolean {
+  return /(^|\/\/)(router|api-inference)\.huggingface\.co\b/.test(endpoint);
+}
+
 interface RemotePayload {
   kind?: string;
   label?: string;
@@ -53,39 +125,71 @@ export class RemoteLLMEngine implements TranslatorEngine {
   id = 'remote';
   label = 'AI endpoint';
   describe = 'Any OpenAI-compatible /chat/completions endpoint. Configured in the sidebar, stored in this browser only.';
-  constructor(private config: EngineConfig) {}
+  private config: EngineConfig;
+  constructor(config: EngineConfig) {
+    this.config = config;
+  }
 
-  async translate(text: string, current: IntentModel | null, selection: string | null): Promise<ParseResult> {
+  async translate(text: string, current: IntentModel | null, selection: string | null, target?: TargetId): Promise<ParseResult> {
     const endpoint = (this.config.endpoint ?? '').trim().replace(/\/$/, '');
     if (!endpoint || !this.config.apiKey) {
       throw new Error('The AI engine needs a key — unlock the key vault in the sidebar first. Your key, your bill.');
     }
 
+    const wantsWorkflow = isWorkflowTarget(target) || Boolean(current?.workflow);
+    const huggingFace = isHuggingFaceEndpoint(endpoint);
     const response = await fetch(`${endpoint}/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.config.apiKey}` },
+      headers: chatHeaders(endpoint, this.config.apiKey),
       body: JSON.stringify({
-        model: this.config.model || 'gpt-4o-mini',
+        model: this.config.model || (huggingFace ? 'Qwen/Qwen2.5-Coder-32B-Instruct' : 'gpt-4o-mini'),
         temperature: 0,
-        response_format: { type: 'json_object' },
+        ...(huggingFace ? { max_tokens: 2048 } : { response_format: { type: 'json_object' } }),
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: wantsWorkflow ? WORKFLOW_PROMPT : SYSTEM_PROMPT },
           {
             role: 'user',
             content: JSON.stringify({
               utterance: text,
               selection,
-              existingModel: current ? { kind: current.kind, label: current.label, props: current.props } : null,
+              existingModel: current
+                ? { kind: current.kind, label: current.label, props: current.props, workflow: current.workflow }
+                : null,
             }),
           },
         ],
       }),
     });
 
-    if (!response.ok) throw new Error(`AI endpoint returned ${response.status}`);
+    if (!response.ok) {
+      let detail = '';
+      try {
+        const body = (await response.json()) as { error?: string | { message?: string } };
+        detail = typeof body.error === 'string' ? body.error : (body.error?.message ?? '');
+      } catch {
+        /* non-JSON error body */
+      }
+      const hint =
+        response.status === 401 && huggingFace ? ' — check the token is an hf_ token with Read (or Inference) permission.' : '';
+      throw new Error(`AI endpoint returned ${response.status}${detail ? `: ${detail}` : ''}${hint}`);
+    }
     const data = (await response.json()) as { choices?: { message?: { content?: string } }[] };
     const raw = data.choices?.[0]?.message?.content ?? '{}';
-    const parsed = JSON.parse(raw.replace(/^```(?:json)?/m, '').replace(/```$/m, '').trim()) as RemotePayload;
+
+    if (wantsWorkflow) {
+      const payload = extractJson(raw) as { label?: string; nodes?: Partial<WorkflowNode>[]; edges?: Partial<WorkflowEdge>[]; notes?: string[] };
+      const graph = normalizeGraph(payload);
+      if (graph.nodes.length === 0) throw new Error('AI endpoint returned an empty workflow.');
+      const model = workflowModel(payload.label ?? current?.label ?? 'AI Pipeline', graph, text);
+      if (current?.workflow) model.id = current.id;
+      const result = workflowResult(model, `AI engine produced a ${graph.nodes.length}-node workflow. Safety re-checked locally.`);
+      for (const note of payload.notes ?? []) {
+        model.warnings.push({ id: `ai.note.${newId()}`, severity: 'info', message: note });
+      }
+      return result;
+    }
+
+    const parsed = extractJson(raw) as RemotePayload;
 
     const base = current ? cloneModel(current) : blankModel(parsed.label ?? 'Object');
     if (parsed.kind) base.kind = parsed.kind;

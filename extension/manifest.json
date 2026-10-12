@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "LinguaCode Terminal Voice",
+  "short_name": "LinguaCode Voice",
+  "version": "0.1.0",
+  "description": "Say what you want, get one verified POSIX command on your clipboard — with a safety note for destructive flags.",
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "LinguaCode voice → shell (Alt+S)" },
+  "options_page": "options.html",
+  "permissions": ["activeTab", "scripting", "storage", "clipboardWrite", "offscreen"],
+  "host_permissions": [
+    "https://router.huggingface.co/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.openai.com/*",
+    "https://openrouter.ai/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "commands": {
+    "toggle-voice": {
+      "suggested_key": { "default": "Alt+S" },
+      "description": "Open the voice → shell overlay"
+    },
+    "toggle-voice-alt": {
+      "suggested_key": { "default": "Ctrl+Shift+Space" },
+      "description": "Open the voice → shell overlay (alternate shortcut)"
+    }
+  }
+}

@@ -4,12 +4,15 @@ import {
   clearSessionSecret,
   clearVault,
   decryptSecret,
+  detectPresetForKey,
+  keyPrefixWarning,
   encryptSecret,
   estimateTokens,
   loadVault,
   loadUsage,
   maskKey,
   parseVaultFile,
+  presetForEndpoint,
   PROVIDER_PRESETS,
   purgeAllKeys,
   resetUsage,
@@ -17,6 +20,7 @@ import {
   saveVault,
   serializeVault,
 } from '../lib/vault.ts';
+import type { ProviderPreset } from '../lib/types.ts';
 
 interface VaultPanelProps {
   secret: VaultSecret | null;
@@ -25,6 +29,24 @@ interface VaultPanelProps {
   onLock: () => void;
   onForget: () => void;
   onUsageChange: (usage: UsageStats) => void;
+}
+
+/** 1-click onramp for providers with a free token page (Hugging Face). */
+function TokenOnramp({ preset }: { preset: ProviderPreset }) {
+  if (!preset.tokenUrl) return null;
+  const tip =
+    "Select 'Read' permissions when creating your token. Your token stays client-side in session memory or encrypted local storage.";
+  return (
+    <div className="onramp">
+      <a className="onramp-link" href={preset.tokenUrl} target="_blank" rel="noopener noreferrer">
+        Get Free Hugging Face Token (No Card Required) ↗
+      </a>
+      <span className="onramp-tip" tabIndex={0} title={tip} aria-label={tip}>
+        i
+      </span>
+      <p className="onramp-note">{tip}</p>
+    </div>
+  );
 }
 
 export default function VaultPanel({
@@ -41,8 +63,7 @@ export default function VaultPanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [tab, setTab] = useState<'session' | 'vault'>('session');
 
-  // Input states
-  const [selectedProvider, setSelectedProvider] = useState<string>('gemini');
+  // Direct inputs — presets only prefill these, they never lock them.
   const [apiKey, setApiKey] = useState('');
   const [endpoint, setEndpoint] = useState(PROVIDER_PRESETS[0].endpoint);
   const [model, setModel] = useState(PROVIDER_PRESETS[0].defaultModel);
@@ -58,19 +79,93 @@ export default function VaultPanel({
   const stored: VaultBlob | null = loadVault();
   const usage = loadUsage();
 
-  const handleProviderSelect = (providerId: string) => {
-    setSelectedProvider(providerId);
-    const found = PROVIDER_PRESETS.find((p) => p.id === providerId);
-    if (found) {
-      setEndpoint(found.endpoint);
-      setModel(found.defaultModel);
-    }
-  };
-
   const flash = (message: string): void => {
     setNotice(message);
     setError(null);
   };
+
+  /** Derived from what is typed, so a chip lights up for a matching URL and nothing is ever locked. */
+  const activePreset = presetForEndpoint(endpoint);
+  const keyWarning = keyPrefixWarning(apiKey, endpoint);
+
+  const applyPreset = (preset: ProviderPreset) => {
+    setEndpoint(preset.endpoint);
+    setModel(preset.defaultModel);
+  };
+
+  /** Pasting a recognisable key (sk-or-, AIza, hf_) prefills its provider — unless a custom URL is already typed. */
+  const handleKeyChange = (value: string) => {
+    setApiKey(value);
+    const detected = detectPresetForKey(value);
+    if (detected && detected.id !== activePreset?.id && (activePreset || !endpoint.trim())) {
+      applyPreset(detected);
+      flash(`Looks like a ${detected.label} key — URL and model prefilled. Edit them freely.`);
+    }
+  };
+
+  const modelListId = activePreset?.models ? `models-${activePreset.id}` : undefined;
+
+  const connectionFields = (
+    <>
+      <div className="preset-chips" role="group" aria-label="Quick presets (optional)">
+        {PROVIDER_PRESETS.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            className={`preset-chip ${activePreset?.id === p.id ? 'on' : ''}`}
+            aria-pressed={activePreset?.id === p.id}
+            title={p.hint}
+            onClick={() => applyPreset(p)}
+          >
+            {p.label.replace(/ \(.*\)$/, '')}
+          </button>
+        ))}
+      </div>
+      {activePreset?.tokenUrl ? <TokenOnramp preset={activePreset} /> : null}
+      <label className="vault-input-label">
+        API Key
+        <input
+          type="password"
+          placeholder="sk-or-…, sk-…, AIza…, hf_… — any OpenAI-compatible key"
+          autoComplete="off"
+          spellCheck={false}
+          value={apiKey}
+          onChange={(e) => handleKeyChange(e.target.value)}
+        />
+      </label>
+      {keyWarning ? <p className="hint key-warning">{keyWarning}</p> : null}
+      <div className="vault-grid-2">
+        <label className="vault-input-label">
+          Base Endpoint URL
+          <input
+            type="text"
+            placeholder="https://openrouter.ai/api/v1"
+            spellCheck={false}
+            value={endpoint}
+            onChange={(e) => setEndpoint(e.target.value)}
+          />
+        </label>
+        <label className="vault-input-label">
+          Model Identifier
+          <input
+            type="text"
+            placeholder="qwen/qwen-2.5-coder-32b-instruct"
+            spellCheck={false}
+            list={modelListId}
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+          />
+          {activePreset?.models ? (
+            <datalist id={modelListId}>
+              {activePreset.models.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+          ) : null}
+        </label>
+      </div>
+    </>
+  );
 
   const wrap = async (fn: () => Promise<void>): Promise<void> => {
     setBusy(true);
@@ -90,6 +185,7 @@ export default function VaultPanel({
     wrap(async () => {
       const cleanKey = apiKey.trim();
       if (!cleanKey) throw new Error('Please paste your API key.');
+      if (!endpoint.trim()) throw new Error('Enter the base endpoint URL.');
       const newSecret: VaultSecret = {
         apiKey: cleanKey,
         endpoint: endpoint.trim(),
@@ -176,12 +272,19 @@ export default function VaultPanel({
       flash('Vault imported. Enter your passphrase to unlock.');
     });
 
-  const purgeAll = () => {
+  /** One click, no confirmation step: drop the key from inputs, React state, sessionStorage and the vault. */
+  const destroyKey = () => {
+    setApiKey('');
+    setPass('');
+    setConfirm('');
+    setShowReplace(false);
+    setShowRotate(false);
     purgeAllKeys();
     clearSessionSecret();
     clearVault();
     onForget();
-    flash('All keys deleted immediately from session, memory, and local storage.');
+    setRevision((r) => r + 1);
+    flash('Key destroyed — removed from inputs, app memory, session storage and the encrypted vault.');
   };
 
   return (
@@ -195,6 +298,11 @@ export default function VaultPanel({
           {secret ? (isSessionOnly ? 'session active' : 'vault unlocked') : stored ? 'locked' : 'no key'}
         </span>
         <span className="vault-title">Bring-Your-Own API Key</span>
+        {secret || stored || apiKey ? (
+          <button type="button" className="destroy-btn" onClick={destroyKey}>
+            Clear / Destroy Key
+          </button>
+        ) : null}
       </header>
 
       {secret ? (
@@ -227,9 +335,6 @@ export default function VaultPanel({
           </div>
 
           <div className="vault-actions">
-            <button type="button" className="ghost danger" onClick={purgeAll}>
-              Delete &amp; Purge Key Now
-            </button>
             <button type="button" className="ghost" onClick={onLock}>
               Lock session
             </button>
@@ -260,25 +365,13 @@ export default function VaultPanel({
 
           {showReplace ? (
             <div className="vault-form">
+              {connectionFields}
               <input
                 type="password"
                 placeholder="passphrase to re-encrypt"
                 value={pass}
                 onChange={(e) => setPass(e.target.value)}
               />
-              <input
-                type="password"
-                placeholder="new API key"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-              />
-              <input
-                type="text"
-                placeholder="endpoint"
-                value={endpoint}
-                onChange={(e) => setEndpoint(e.target.value)}
-              />
-              <input type="text" placeholder="model" value={model} onChange={(e) => setModel(e.target.value)} />
               <button type="button" className="primary" disabled={busy} onClick={replaceKey}>
                 Replace &amp; re-encrypt
               </button>
@@ -328,49 +421,10 @@ export default function VaultPanel({
             <div className="vault-form">
               <p className="hint">
                 Enter an API key for your active beta testing workflows. It stays strictly in frontend memory, is never
-                saved permanently to disk, and can be destroyed at any moment with one click.
+                saved permanently to disk, and can be destroyed at any moment with one click. Presets below only prefill —
+                every field stays editable.
               </p>
-              <label className="vault-input-label">
-                Provider Preset
-                <select value={selectedProvider} onChange={(e) => handleProviderSelect(e.target.value)}>
-                  {PROVIDER_PRESETS.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="vault-input-label">
-                API Key
-                <input
-                  type="password"
-                  placeholder="Paste your API key (e.g., AIzaSy... or sk-...)"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                />
-              </label>
-
-              <div className="vault-grid-2">
-                <label className="vault-input-label">
-                  Endpoint URL
-                  <input
-                    type="text"
-                    placeholder="https://..."
-                    value={endpoint}
-                    onChange={(e) => setEndpoint(e.target.value)}
-                  />
-                </label>
-                <label className="vault-input-label">
-                  Model
-                  <input
-                    type="text"
-                    placeholder="model ID"
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                  />
-                </label>
-              </div>
+              {connectionFields}
 
               <div className="vault-actions">
                 <button type="button" className="primary" disabled={busy} onClick={setSessionKey}>
@@ -401,9 +455,6 @@ export default function VaultPanel({
                 <button type="button" className="ghost" onClick={() => fileRef.current?.click()}>
                   Import vault file
                 </button>
-                <button type="button" className="ghost danger" onClick={purgeAll}>
-                  Delete Vault
-                </button>
               </div>
             </div>
           ) : (
@@ -411,16 +462,7 @@ export default function VaultPanel({
               <p className="hint">
                 Store your API key encrypted at rest on this device. Decrypted only in memory with your passphrase.
               </p>
-              <label className="vault-input-label">
-                Provider Preset
-                <select value={selectedProvider} onChange={(e) => handleProviderSelect(e.target.value)}>
-                  {PROVIDER_PRESETS.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {connectionFields}
               <input
                 type="password"
                 placeholder="Choose passphrase (min 8 characters)"
@@ -433,26 +475,6 @@ export default function VaultPanel({
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
               />
-              <input
-                type="password"
-                placeholder="API key"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-              />
-              <div className="vault-grid-2">
-                <input
-                  type="text"
-                  placeholder="endpoint"
-                  value={endpoint}
-                  onChange={(e) => setEndpoint(e.target.value)}
-                />
-                <input
-                  type="text"
-                  placeholder="model"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                />
-              </div>
               <div className="vault-actions">
                 <button type="button" className="primary" disabled={busy} onClick={createVault}>
                   Encrypt &amp; Store

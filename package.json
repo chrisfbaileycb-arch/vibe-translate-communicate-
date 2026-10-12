@@ -8,6 +8,8 @@
     "dev": "vite --host 0.0.0.0 --port 3000",
     "lint": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
+    "build:extension": "tsc --noEmit -p extension && node scripts/build-extension.mjs",
+    "build:widget": "tsc --noEmit -p widget && node scripts/build-widget.mjs",
     "preview": "vite preview",
     "test": "node --experimental-strip-types src/lib/smoke.test.ts && node --experimental-strip-types src/lib/vault.test.ts"
   },

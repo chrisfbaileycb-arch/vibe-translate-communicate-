@@ -118,6 +118,59 @@ src/lib/smoke.test.ts node --experimental-strip-types, no test framework needed
   contrast — cheap rules that catch the failures language models happily produce.
 - **The scratch render is disposable.** It exists to be argued with, not to be admired.
 
+## Terminal Voice Companion (Chrome extension)
+
+`extension/` holds a Manifest V3 companion: press **Alt+S** (or **Ctrl+Shift+Space**) on any page,
+say what you want, and get **one** POSIX command plus a one-line safety note.
+
+```bash
+npm run build:extension   # -> dist-extension/
+```
+
+Load it at `chrome://extensions` → Developer mode → **Load unpacked** → `dist-extension/`.
+
+- **Same engine as the studio.** `src/lib/shell.ts` turns the utterance into a command with the local
+  workflow rules, or with your BYOK endpoint (Hugging Face router, Gemini, OpenAI…). Either way
+  `safety.ts` re-checks the result locally — an LLM cannot talk its way past the safety note.
+- **Clipboard.** Safe and caution commands are copied immediately — press `Ctrl+Shift+V` in your
+  terminal. Destructive ones (`rm -rf`, `DROP`, `kill`, `--force` …) are **never** auto-copied;
+  you press "Copy anyway".
+- **Web terminals.** On xterm.js terminals (VS Code Web, Cloud Shell, Gitpod, ttyd…) "Insert into
+  terminal" pastes into the prompt **without a newline** — you still press Enter.
+- **Speech.** Browser speech recognition by default, or Hugging Face Whisper with your `hf_` token.
+  The overlay runs inside the page, so each site asks for microphone access once.
+- **Keys** live in `chrome.storage.session` (memory-only, unreadable by web pages) or encrypted
+  with your passphrase using the studio's vault format. All network calls happen in the background
+  worker, never in the page.
+
+Limits: Chrome only fires extension shortcuts while a Chrome window is focused, and it won't inject
+into `chrome://` pages or the Web Store — there the shortcut opens the options page's "Try it" box.
+Terminals inside cross-origin iframes aren't reachable for insertion; the clipboard path still works.
+
+## Linux Terminal Voice Companion
+
+A native CLI for when the browser sandbox is in the way. One install line, everything in `~/.local`, no sudo:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chrisfbaileycb-arch/vibe-translate-communicate-/main/scripts/install-widget.sh | bash
+```
+
+```bash
+linguacode-voice "find log files bigger than 100MB"   # command on stdout, safety line on stderr, copied
+linguacode-voice                                       # speak; Enter stops recording
+eval "$(linguacode-voice --shell-init bash)"           # Alt+S speaks onto the prompt line (bash/zsh) — never auto-runs
+linguacode-voice --notify                              # bind to a desktop hotkey
+linguacode-voice key set | key clear | key status      # OpenRouter by default; keyring or 0600 file
+```
+
+- `widget/src/cli.ts` reuses `src/lib/shell.ts` + `safety.ts`, so the studio, the Chrome extension and the CLI
+  agree on what is destructive. `npm run build:widget` bundles it into **one** Node 18+ file,
+  `widget/release/linguacode-voice.mjs`, plus `SHA256SUMS`. That release file is committed — the installer
+  downloads it straight from the repo — so **rebuild and commit it whenever `shell.ts`, `safety.ts` or `workflow.ts` change.**
+- Audio: PipeWire / PulseAudio / ALSA / ffmpeg. Speech-to-text: whisper.cpp (`whisper-cli` +
+  `LINGUACODE_WHISPER_MODEL`) offline, or `HF_TOKEN` for Hugging Face Whisper; otherwise it asks you to type.
+- Clipboard: `wl-copy` (Wayland), `xclip` / `xsel` (X11). Destructive commands need an explicit yes.
+
 ## Roadmap
 
 - Real AST parsing for reverse mode (acorn/ts-morph) instead of heuristic extraction.

@@ -6,6 +6,7 @@ import { lint } from './lib/lint.ts';
 import { generate, generatePreviewDoc } from './lib/generate.ts';
 import { reverseFromCode, type ReverseResult } from './lib/reverse.ts';
 import { createEngine } from './lib/engine.ts';
+import { applyPropToWorkflow, ensureWorkflow, isWorkflowTarget } from './lib/workflow.ts';
 import { useSpeech } from './lib/useSpeech.ts';
 import type { UsageStats, VaultSecret } from './lib/vault.ts';
 import {
@@ -32,6 +33,8 @@ import IntentPanel from './components/IntentPanel.tsx';
 import CodePanel from './components/CodePanel.tsx';
 import PreviewPanel from './components/PreviewPanel.tsx';
 import CoverLanding from './components/CoverLanding.tsx';
+import MembershipModal, { type MembershipTierId } from './components/MembershipModal.tsx';
+import LinuxWidgetModal from './components/LinuxWidgetModal.tsx';
 
 type Mode = 'cover' | 'speak' | 'reverse';
 
@@ -41,6 +44,8 @@ const TARGETS: { id: TargetId; label: string }[] = [
   { id: 'python', label: 'Python' },
   { id: 'typescript', label: 'TypeScript contract' },
   { id: 'json', label: 'Intent model (JSON)' },
+  { id: 'shell', label: 'POSIX Shell / DevOps Pipeline' },
+  { id: 'workflow', label: 'Workflow Automation / DAG' },
 ];
 
 const QUICK_PHRASES = [
@@ -49,6 +54,13 @@ const QUICK_PHRASES = [
   'Select the top width',
   'Make it wider',
   'A blue button that says "Save"',
+];
+
+const WORKFLOW_PHRASES = [
+  'When I say deploy, run the tests, then build, then push to main',
+  'Every night at 2am find old .log files in the logs folder, compress them, then delete old logs',
+  'When a webhook arrives, summarize the payload, then notify slack',
+  'then check disk space',
 ];
 
 const DEFAULT_HERO_CODE = `"use client"
@@ -194,6 +206,8 @@ export default function App() {
   const [reverse, setReverse] = useState<ReverseResult | null>(null);
   const [engineConfig, setEngineConfig] = useState<EngineConfig>(loadEngineConfig);
   const [busy, setBusy] = useState(false);
+  const [membershipOpen, setMembershipOpen] = useState(false);
+  const [linuxWidgetOpen, setLinuxWidgetOpen] = useState(false);
 
   // Session vs Vault API key
   const [vaultSecret, setVaultSecret] = useState<VaultSecret | null>(loadSessionSecret);
@@ -299,11 +313,15 @@ export default function App() {
       try {
         const isRemote = engineConfig.id === 'remote';
         const engine = createEngine({ ...engineConfig, apiKey: vaultSecret?.apiKey });
-        const result = await engine.translate(clean, model, selection);
+        const result = await engine.translate(clean, model, selection, target);
         setHistory((h) => (model ? [...h, model] : h).slice(-40));
         setModel(result.model);
         setSelection(result.selection);
         pushLog(result.message);
+        if (result.model.workflow && !isWorkflowTarget(target)) {
+          setTarget('workflow');
+          pushLog('Switched target to Workflow / DAG to show the canvas.');
+        }
         if (isRemote) {
           setUsage(bumpUsage(clean.length, JSON.stringify(result.model).length));
           armAutoLock();
@@ -314,7 +332,7 @@ export default function App() {
         setBusy(false);
       }
     },
-    [engineConfig, model, selection, pushLog, undo, vaultSecret, armAutoLock],
+    [engineConfig, model, selection, target, pushLog, undo, vaultSecret, armAutoLock],
   );
 
   const speech = useSpeech((text, isFinal) => {
@@ -333,6 +351,7 @@ export default function App() {
       prop.value = value;
       prop.confidence = Math.max(prop.confidence, 0.9);
       prop.source = prop.source?.startsWith('voice') ? prop.source : 'manual edit';
+      applyPropToWorkflow(next, key);
       next.updatedAt = Date.now();
       next.warnings = lint(next);
       setHistory((h) => [...h, model].slice(-40));
@@ -368,6 +387,11 @@ export default function App() {
     }
     return model ? generatePreviewDoc(model) : PLACEHOLDER_DOC;
   }, [mode, reverse, model]);
+
+  const workflowGraph = useMemo(() => {
+    if (!model || !(model.workflow || isWorkflowTarget(target))) return null;
+    return ensureWorkflow(model, generated?.filename);
+  }, [model, target, generated]);
 
   const codeView =
     mode === 'reverse' && reverse
@@ -523,6 +547,14 @@ export default function App() {
             </div>
           )}
 
+          <button type="button" className="ghost" onClick={() => setLinuxWidgetOpen(true)} title="Terminal Voice Companion for Linux">
+            Linux widget
+          </button>
+
+          <button type="button" className="ghost founding-btn" onClick={() => setMembershipOpen(true)}>
+            Founding seat · $10/qtr
+          </button>
+
           <span className="backend-tag">{firebaseOnline ? 'Firebase: Active' : 'Firebase'}</span>
 
           <button type="button" className="ghost" onClick={undo} disabled={history.length === 0}>
@@ -577,7 +609,7 @@ export default function App() {
                 {speech.listening ? <p className="interim">{speech.interim || '…listening'}</p> : null}
                 {speech.error ? <p className="error-line">{speech.error}</p> : null}
                 <div className="quick-row">
-                  {QUICK_PHRASES.map((phrase) => (
+                  {(isWorkflowTarget(target) ? WORKFLOW_PHRASES : QUICK_PHRASES).map((phrase) => (
                     <button
                       key={phrase}
                       type="button"
@@ -641,7 +673,7 @@ export default function App() {
                     onChange={(e) => saveEngineConfig({ id: e.target.value as EngineConfig['id'] })}
                   >
                     <option value="local">Local rules (offline)</option>
-                    <option value="remote">AI endpoint (Custom / Gemini / OpenAI)</option>
+                    <option value="remote">AI endpoint (Hugging Face / Gemini / OpenAI / Custom)</option>
                   </select>
                 </label>
                 {engineConfig.id === 'remote' ? (
@@ -770,10 +802,27 @@ export default function App() {
             </section>
           )}
 
-          <PreviewPanel doc={previewDoc} selection={selection} onSelect={setSelection} />
+          <PreviewPanel
+            doc={previewDoc}
+            selection={selection}
+            onSelect={setSelection}
+            workflow={workflowGraph}
+            showSafety={target === 'shell' || Boolean(model?.workflow)}
+          />
         </div>
       </main>
       )}
+
+      {linuxWidgetOpen ? <LinuxWidgetModal onClose={() => setLinuxWidgetOpen(false)} /> : null}
+
+      {membershipOpen ? (
+        <MembershipModal
+          onClose={() => setMembershipOpen(false)}
+          onSelectTier={(tier: MembershipTierId) =>
+            pushLog(`${tier === 'founding' ? 'Founding Contributor ($10/quarter)' : tier} seat selected — checkout is not connected yet.`)
+          }
+        />
+      ) : null}
     </div>
   );
 }

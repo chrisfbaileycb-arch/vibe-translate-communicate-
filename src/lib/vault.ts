@@ -12,6 +12,8 @@
  * person who brought the key.
  */
 
+import type { ProviderPreset } from './types.ts';
+
 export interface VaultSecret {
   apiKey: string;
   endpoint: string;
@@ -39,44 +41,67 @@ const SESSION_VAULT_KEY = 'ct.session_vault.v1';
 const USAGE_KEY = 'ct.usage.v1';
 const PBKDF2_ITERATIONS = 600_000;
 
-export interface ProviderPreset {
-  id: string;
-  label: string;
-  endpoint: string;
-  defaultModel: string;
-  hint: string;
-}
+export type { ProviderPreset };
+
+export const HF_PRESET_ID = 'huggingface';
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    endpoint: 'https://openrouter.ai/api/v1',
+    defaultModel: 'qwen/qwen-2.5-coder-32b-instruct',
+    models: ['qwen/qwen-2.5-coder-32b-instruct', 'deepseek/deepseek-chat'],
+    hint: 'One key for hundreds of models. Set a credit cap on the key at openrouter.ai.',
+    tokenPrefix: 'sk-or-',
+  },
+  {
     id: 'gemini',
-    label: 'Google Gemini (OpenAI-compatible)',
+    label: 'Google Gemini',
     endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai',
     defaultModel: 'gemini-2.5-flash',
-    hint: 'Enter your Google AI Studio Gemini API key.',
+    hint: 'Google AI Studio key via the OpenAI-compatible endpoint.',
+    tokenPrefix: 'AIza',
+  },
+  {
+    id: HF_PRESET_ID,
+    label: 'Hugging Face (Free Serverless Router)',
+    endpoint: 'https://router.huggingface.co/v1',
+    defaultModel: 'Qwen/Qwen2.5-Coder-32B-Instruct',
+    models: ['Qwen/Qwen2.5-Coder-32B-Instruct', 'meta-llama/Llama-3.1-8B-Instruct'],
+    hint: 'Free-tier Hugging Face token with Read permission.',
+    tokenUrl: 'https://huggingface.co/settings/tokens',
+    tokenPrefix: 'hf_',
   },
   {
     id: 'openai',
     label: 'OpenAI',
     endpoint: 'https://api.openai.com/v1',
     defaultModel: 'gpt-4o-mini',
-    hint: 'Enter your OpenAI API key.',
-  },
-  {
-    id: 'openrouter',
-    label: 'OpenRouter',
-    endpoint: 'https://openrouter.ai/api/v1',
-    defaultModel: 'meta-llama/llama-3.3-70b-instruct',
-    hint: 'Enter your OpenRouter API key.',
+    hint: 'OpenAI API key.',
   },
   {
     id: 'custom',
-    label: 'Custom endpoint (Ollama / Local / Proxy)',
+    label: 'Local / Custom Proxy',
     endpoint: 'http://localhost:11434/v1',
     defaultModel: 'llama3',
-    hint: 'Any OpenAI-compatible /chat/completions endpoint.',
+    hint: 'Any OpenAI-compatible /chat/completions endpoint (Ollama, LiteLLM, vLLM, your proxy).',
   },
 ];
+
+/** The preset whose endpoint is currently typed in, if any — presets prefill, they never lock. */
+export function presetForEndpoint(endpoint: string): ProviderPreset | undefined {
+  const clean = endpoint.trim().replace(/\/+$/, '');
+  return PROVIDER_PRESETS.find((p) => p.endpoint === clean);
+}
+
+/** Non-blocking: a hint when a key does not look like the selected provider's keys. */
+export function keyPrefixWarning(apiKey: string, endpoint: string): string | null {
+  const preset = presetForEndpoint(endpoint);
+  const key = apiKey.trim();
+  if (!key || !preset?.tokenPrefix || key.startsWith(preset.tokenPrefix)) return null;
+  return `${preset.label} keys usually start with "${preset.tokenPrefix}" — using it anyway.`;
+}
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -263,4 +288,10 @@ export function estimateTokens(chars: number): number {
 export function maskKey(key: string): string {
   if (key.length <= 8) return '••••••••';
   return `${key.slice(0, 3)}${'•'.repeat(Math.min(12, key.length - 7))}${key.slice(-4)}`;
+}
+
+/** Picks the preset a pasted key belongs to, by its prefix (e.g. hf_ -> Hugging Face). */
+export function detectPresetForKey(apiKey: string): ProviderPreset | undefined {
+  const key = apiKey.trim();
+  return PROVIDER_PRESETS.find((p) => p.tokenPrefix && key.startsWith(p.tokenPrefix));
 }

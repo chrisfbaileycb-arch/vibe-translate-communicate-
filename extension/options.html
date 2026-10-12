@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LinguaCode Terminal Voice · Options</title>
+  <style>
+    :root {
+      --bg: #0b1220; --panel: #16223a; --line: #26364f; --text: #e6edf7; --muted: #93a4bd;
+      --accent: #38bdf8; --accent-2: #2563eb; --good: #34d399; --warn: #f59e0b; --error: #f87171;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    main { max-width: 720px; margin: 0 auto; padding: 32px 16px 60px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .lede { color: var(--muted); margin: 0 0 24px; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+    h2 { font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; }
+    label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 10px; }
+    label.inline { display: flex; align-items: center; gap: 8px; color: var(--text); }
+    input[type=text], input[type=password], select {
+      display: block; width: 100%; margin-top: 4px; padding: 8px 10px; border-radius: 8px;
+      border: 1px solid var(--line); background: #0a1120; color: var(--text); font: inherit;
+    }
+    input:focus, select:focus { outline: none; border-color: var(--accent); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 12px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    button { border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--text); padding: 7px 13px; font: 600 13px/1.4 inherit; cursor: pointer; }
+    button.primary { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
+    button.danger { color: var(--error); border-color: rgba(248, 113, 113, 0.4); }
+    button:hover { border-color: var(--accent); }
+    .hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+    .onramp { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; margin-bottom: 12px; border-radius: 9px; background: rgba(255, 210, 30, 0.07); border: 1px solid rgba(255, 210, 30, 0.3); }
+    .onramp a { color: #ffd21e; font-weight: 700; text-decoration: none; }
+    .keystate { font-family: ui-monospace, monospace; font-size: 12.5px; }
+    .ok { color: var(--good); } .err { color: var(--error); }
+    .shortcuts kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px; }
+    #try-out { margin-top: 12px; }
+    #try-cmd { font: 13px ui-monospace, monospace; padding: 10px 12px; border-radius: 8px; background: #0a1120; border: 1px solid var(--line); border-left-width: 3px; word-break: break-all; }
+    #try-cmd.safe { border-left-color: var(--good); } #try-cmd.caution { border-left-color: var(--warn); } #try-cmd.destructive { border-left-color: var(--error); }
+    #try-note.safe { color: var(--good); } #try-note.caution { color: var(--warn); } #try-note.destructive { color: var(--error); font-weight: 600; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>LinguaCode Terminal Voice</h1>
+    <p class="lede">Speak a task, get one POSIX command on your clipboard with a one-line safety note. Destructive commands are never copied automatically.</p>
+
+    <section class="shortcuts">
+      <h2>Shortcut</h2>
+      <p id="shortcut-list">Loading…</p>
+      <button type="button" id="edit-shortcuts">Change shortcuts</button>
+      <p class="hint">Chrome only fires extension shortcuts while a Chrome window is focused. On pages Chrome protects (chrome://, the Web Store) the shortcut opens this page instead.</p>
+    </section>
+
+    <section id="try">
+      <h2>Try it</h2>
+      <form id="try-form" class="row">
+        <input type="text" id="try-input" placeholder="kill whatever is on port 3000" aria-label="Describe a shell command" style="flex:1;margin:0" />
+        <button type="submit" class="primary">Translate</button>
+      </form>
+      <div id="try-out" hidden>
+        <div id="try-cmd"></div>
+        <p id="try-note"></p>
+        <button type="button" id="try-copy">Copy</button>
+      </div>
+      <p class="hint" id="try-status"></p>
+    </section>
+
+    <section>
+      <h2>Translation engine</h2>
+      <label class="inline"><input type="radio" name="engine" value="local" /> Local rules — offline, instant, deterministic</label>
+      <label class="inline"><input type="radio" name="engine" value="remote" /> AI endpoint with your own key (falls back to local rules while no key is unlocked)</label>
+      <label class="inline"><input type="checkbox" id="auto-copy" /> Copy safe and caution commands to the clipboard automatically</label>
+    </section>
+
+    <section>
+      <h2>Speech</h2>
+      <label class="inline"><input type="radio" name="speech" value="webspeech" /> Browser speech recognition (Chrome sends audio to Google's speech service)</label>
+      <label class="inline"><input type="radio" name="speech" value="whisper" /> Hugging Face Whisper (audio goes to Hugging Face with your hf_ token)</label>
+      <p class="hint">Either way the site you are on asks for microphone access the first time — the overlay runs inside that page.</p>
+    </section>
+
+    <section>
+      <h2>Your API key</h2>
+      <p>Status: <span id="key-state" class="keystate">no key</span></p>
+
+      <div class="onramp" id="onramp">
+        <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener noreferrer">Get Free Hugging Face Token (No Card Required) ↗</a>
+        <span class="hint" style="margin:0">Select 'Read' permissions when creating your token. Your token stays client-side in session memory or encrypted local storage.</span>
+      </div>
+
+      <label>Provider preset <select id="provider"></select></label>
+      <label>API key <input type="password" id="api-key" placeholder="hf_… / AIzaSy… / sk-…" autocomplete="off" /></label>
+      <div class="grid">
+        <label>Endpoint URL <input type="text" id="endpoint" /></label>
+        <label>Model <input type="text" id="model" list="model-list" /><datalist id="model-list"></datalist></label>
+      </div>
+      <div class="row">
+        <button type="button" class="primary" id="use-session">Use for this browser session</button>
+      </div>
+      <p class="hint">Session keys live in memory-backed extension storage, are never readable by web pages, and vanish when Chrome restarts.</p>
+
+      <div class="grid" style="margin-top:14px">
+        <label>Passphrase (8+ characters) <input type="password" id="pass" autocomplete="new-password" /></label>
+      </div>
+      <div class="row">
+        <button type="button" id="encrypt">Encrypt &amp; remember</button>
+        <button type="button" id="unlock" hidden>Unlock saved key</button>
+        <button type="button" class="danger" id="forget">Forget key everywhere</button>
+      </div>
+      <p class="hint">Remembered keys are encrypted with PBKDF2-SHA256 (600k iterations) + AES-GCM, same as the LinguaCode studio vault.</p>
+      <p id="key-status" class="hint" role="status"></p>
+    </section>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

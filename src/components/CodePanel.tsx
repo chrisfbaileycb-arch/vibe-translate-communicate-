@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CodeRange, IntentModel } from '../lib/types.ts';
 import { generate } from '../lib/generate.ts';
 
@@ -25,6 +25,7 @@ export default function CodePanel({
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
 
   const lines = useMemo(() => code.split('\n'), [code]);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const nodeByLine = useMemo(() => {
     const map = new Map<number, string>();
@@ -44,6 +45,17 @@ export default function CodePanel({
     }
     return set;
   }, [lineMap, selection]);
+
+  // Selecting a node elsewhere (canvas, render, semantic layer) brings its first line into view.
+  useEffect(() => {
+    const box = scrollRef.current;
+    const hot = box?.querySelector<HTMLElement>('.code-hot');
+    if (!box || !hot) return;
+    const top = hot.getBoundingClientRect().top - box.getBoundingClientRect().top;
+    if (top < 0 || top > box.clientHeight - hot.offsetHeight) {
+      box.scrollTo({ top: box.scrollTop + top - box.clientHeight / 3, behavior: 'smooth' });
+    }
+  }, [highlighted]);
 
   const copy = async () => {
     try {
@@ -76,6 +88,7 @@ export default function CodePanel({
     else if (filename.endsWith('.py')) mime = 'text/x-python';
     else if (filename.endsWith('.html')) mime = 'text/html';
     else if (filename.endsWith('.json')) mime = 'application/json';
+    else if (filename.endsWith('.sh')) mime = 'text/x-shellscript';
 
     saveFileToDisk(code, filename, mime);
   };
@@ -150,7 +163,7 @@ export default function CodePanel({
 
       {downloadNotice ? <div className="vault-notice">{downloadNotice}</div> : null}
 
-      <div className="code-scroll">
+      <div className="code-scroll" ref={scrollRef}>
         {lines.map((line, i) => {
           const n = i + 1;
           const node = nodeByLine.get(n);
