@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { WorkflowGraph } from '../lib/types.ts';
+import type { WorkflowGraph, WorkflowNode, WorkflowNodeType } from '../lib/types.ts';
 import { ensureWorkflow } from '../lib/workflow.ts';
 import WorkflowCanvas, { SafetyInspector } from './WorkflowCanvas.tsx';
 
@@ -11,6 +11,12 @@ interface PreviewPanelProps {
   workflow?: WorkflowGraph | null;
   /** Show the shell Safety & Flag Inspector under the canvas. */
   showSafety?: boolean;
+  /** Live callback when a workflow stage label/command is edited inside the DAG */
+  onUpdateWorkflowNode?: (nodeId: string, patch: Partial<WorkflowNode>) => void;
+  /** Live callback to append a new workflow stage */
+  onAddWorkflowNode?: (type: WorkflowNodeType) => void;
+  /** Hint when target or model switches to workflow/pipeline */
+  autoSwitchToWorkflow?: boolean;
 }
 
 type DevicePreset = 'desktop' | 'mobile';
@@ -55,7 +61,16 @@ const BINDING_SCRIPT = `
 <\/script>
 `;
 
-export default function PreviewPanel({ doc, selection, onSelect, workflow, showSafety }: PreviewPanelProps) {
+export default function PreviewPanel({
+  doc,
+  selection,
+  onSelect,
+  workflow,
+  showSafety,
+  onUpdateWorkflowNode,
+  onAddWorkflowNode,
+  autoSwitchToWorkflow,
+}: PreviewPanelProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const fullscreenFrameRef = useRef<HTMLIFrameElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -65,6 +80,12 @@ export default function PreviewPanel({ doc, selection, onSelect, workflow, showS
   const [device, setDevice] = useState<DevicePreset>('desktop');
   const [containerWidth, setContainerWidth] = useState<number>(540);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
+
+  useEffect(() => {
+    if (autoSwitchToWorkflow) {
+      setView('workflow');
+    }
+  }, [autoSwitchToWorkflow]);
 
   // Fallback workflow graph if none provided yet
   const effectiveWorkflow = useMemo(() => {
@@ -248,10 +269,17 @@ export default function PreviewPanel({ doc, selection, onSelect, workflow, showS
 
       {view === 'workflow' ? (
         <>
-          <WorkflowCanvas graph={effectiveWorkflow} selection={selection} onSelect={onSelect} />
+          <WorkflowCanvas
+            graph={effectiveWorkflow}
+            selection={selection}
+            onSelect={onSelect}
+            onUpdateNode={onUpdateWorkflowNode}
+            onAddNode={onAddWorkflowNode}
+            onSwitchToPreview={() => setView('preview')}
+          />
           {showSafety ? <SafetyInspector graph={effectiveWorkflow} selection={selection} onSelect={onSelect} /> : null}
           <p className="preview-foot">
-            Click a node in the DAG to light up its code lines in the code panel — or click a code line to find its node.
+            Click a node in the DAG to light up its code lines &amp; edit its stage — or click <b>▶ Run / Verify Workflow</b> to trace the pipeline.
           </p>
         </>
       ) : (

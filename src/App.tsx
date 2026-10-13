@@ -1,12 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
-import type { EngineConfig, IntentModel, TargetId } from './lib/types.ts';
+import type { EngineConfig, IntentModel, TargetId, WorkflowNode, WorkflowNodeType } from './lib/types.ts';
 import { cloneModel } from './lib/types.ts';
 import { lint } from './lib/lint.ts';
 import { generate, generatePreviewDoc } from './lib/generate.ts';
-import { reverseFromCode, type ReverseResult } from './lib/reverse.ts';
+import {
+  buildHeroPreviewDoc,
+  codeToPictureDataUrl,
+  looksLikeCode,
+  reverseFromCode,
+  reverseFromImage,
+  SAMPLE_REVERSE_IMAGES,
+  type ImageVisualMeta,
+  type ReverseResult,
+  type SampleReverseImage,
+} from './lib/reverse.ts';
 import { createEngine } from './lib/engine.ts';
-import { applyPropToWorkflow, ensureWorkflow, isWorkflowTarget } from './lib/workflow.ts';
+import {
+  applyPropToWorkflow,
+  ensureWorkflow,
+  isWorkflowTarget,
+  normalizeGraph,
+  propsFromWorkflow,
+  WORKFLOW_KIND,
+} from './lib/workflow.ts';
 import { useSpeech } from './lib/useSpeech.ts';
 import type { UsageStats, VaultSecret } from './lib/vault.ts';
 import {
@@ -38,7 +55,7 @@ import CoverLanding from './components/CoverLanding.tsx';
 import MembershipModal, { type MembershipTierId } from './components/MembershipModal.tsx';
 import LinuxWidgetModal from './components/LinuxWidgetModal.tsx';
 
-type Mode = 'cover' | 'speak' | 'reverse';
+type Mode = 'cover' | 'speak' | 'reverse' | 'picture';
 
 const TARGETS: { id: TargetId; label: string }[] = [
   { id: 'nextjs', label: 'Next.js / React (TSX)' },
@@ -206,6 +223,16 @@ export default function App() {
   const [transcript, setTranscript] = useState('');
   const [reverseCode, setReverseCode] = useState(DEFAULT_HERO_CODE);
   const [reverse, setReverse] = useState<ReverseResult | null>(null);
+  const [pictureDataUrl, setPictureDataUrl] = useState<string>(SAMPLE_REVERSE_IMAGES[0].dataUrl);
+  const [pictureFileName, setPictureFileName] = useState<string>('saas-pricing-card.svg');
+  const [pictureSampleId, setPictureSampleId] = useState<string | undefined>(SAMPLE_REVERSE_IMAGES[0].id);
+  const [pictureHint, setPictureHint] = useState<string>('');
+  const [pictureCodeInput, setPictureCodeInput] = useState<string>('');
+  const [pictureMeta, setPictureMeta] = useState<ImageVisualMeta | null>(null);
+  const [pictureProvider, setPictureProvider] = useState<string>('local-vision');
+  const [dragActive, setDragActive] = useState<boolean>(false);
+  const [showReverseSource, setShowReverseSource] = useState<boolean>(true);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [engineConfig, setEngineConfig] = useState<EngineConfig>(loadEngineConfig);
   const [busy, setBusy] = useState(false);
   const [membershipOpen, setMembershipOpen] = useState(false);
@@ -388,13 +415,143 @@ export default function App() {
       next.warnings = lint(next);
       setHistory((h) => [...h, model].slice(-40));
       setModel(next);
+      setReverse((prev) =>
+        prev
+          ? {
+              ...prev,
+              model: next,
+              previewDoc: next.kind === 'ui/hero' ? buildHeroPreviewDoc(next) : generatePreviewDoc(next),
+            }
+          : null,
+      );
       setSelection(key);
       pushLog(`${prop.label} → ${String(value)}${prop.unit ?? ''} (manual edit)`);
     },
     [model, pushLog],
   );
 
-  // Reverse mode: code -> semantic model + visual, on debounce
+  const handleUpdateWorkflowNode = useCallback(
+    (nodeId: string, patch: Partial<WorkflowNode>) => {
+      const baseModel: IntentModel =
+        model ?? {
+          id: 'wf_live',
+          kind: WORKFLOW_KIND,
+          label: 'LiveWorkflow',
+          props: [],
+          warnings: [],
+          updatedAt: Date.now(),
+        };
+      const next = cloneModel(baseModel);
+      const wf = cloneModel({ ...next, workflow: ensureWorkflow(next, `${next.label}.sh`) }).workflow!;
+      const targetNode = wf.nodes.find((n) => n.id === nodeId);
+      if (!targetNode) return;
+      if (patch.label !== undefined) targetNode.label = patch.label;
+      if (patch.command !== undefined) targetNode.command = patch.command;
+      if (patch.detail !== undefined) targetNode.detail = patch.detail;
+      next.workflow = normalizeGraph(wf);
+      if (next.kind === WORKFLOW_KIND) {
+        next.props = propsFromWorkflow(next.workflow, 'workflow canvas edit');
+      } else {
+        const matchingProp = next.props.find((p) => p.nodeId === nodeId || p.key === nodeId);
+        if (matchingProp) {
+          matchingProp.value = targetNode.command ?? targetNode.detail ?? targetNode.label;
+        }
+      }
+      next.updatedAt = Date.now();
+      next.warnings = lint(next);
+      setModel(next);
+      setSelection(nodeId);
+      pushLog(`Updated workflow stage "${targetNode.label}" (${nodeId}).`);
+    },
+    [model, pushLog],
+  );
+
+  const handleAddWorkflowNode = useCallback(
+    (type: WorkflowNodeType) => {
+      const baseModel: IntentModel =
+        model ?? {
+          id: 'wf_live',
+          kind: WORKFLOW_KIND,
+          label: 'LiveWorkflow',
+          props: [],
+          warnings: [],
+          updatedAt: Date.now(),
+        };
+      const next = cloneModel(baseModel);
+      const wf = cloneModel({ ...next, workflow: ensureWorkflow(next, `${next.label}.sh`) }).workflow!;
+      const idx = wf.nodes.length + 1;
+      const newId = wf.nodes.some((n) => n.id.startsWith('step.')) ? `step.${idx}` : `stage.step${idx}`;
+      const prevLast = wf.nodes[wf.nodes.length - 1];
+      wf.nodes.push({
+        id: newId,
+        type,
+        label: `Step ${idx}: Verify & Emit`,
+        command: 'echo "verified step"',
+        destination: 'terminal',
+      });
+      if (prevLast) {
+        wf.edges.push({ from: prevLast.id, to: newId });
+      }
+      next.workflow = normalizeGraph(wf);
+      if (next.kind === WORKFLOW_KIND) {
+        next.props = propsFromWorkflow(next.workflow, 'added workflow step');
+      }
+      next.updatedAt = Date.now();
+      next.warnings = lint(next);
+      setHistory((h) => (model ? [...h, model] : h).slice(-40));
+      setModel(next);
+      setSelection(newId);
+      pushLog(`Added workflow stage "${newId}" to DAG.`);
+    },
+    [model, pushLog],
+  );
+
+  // Unified Code -> Picture & Workflow handler (works from Code -> Visual, Picture -> Code, or CodePanel)
+  const applyCodeToPictureAndWorkflow = useCallback(
+    (codeText: string, stayInPictureMode = false) => {
+      const clean = codeText.trim();
+      if (!clean) return;
+      const result = reverseFromCode(clean);
+      const svgUrl = codeToPictureDataUrl(result.model);
+      const primaryColor = String(
+        result.model.props.find((p) => p.key === 'primaryColor' || p.key === 'color')?.value ?? '#38bdf8',
+      );
+      const backgroundColor = String(
+        result.model.props.find((p) => p.key === 'backgroundColor')?.value ?? '#0f172a',
+      );
+      const widthVal = Number(
+        result.model.props.find((p) => p.key === 'width' || p.key === 'top.width')?.value ?? 480,
+      );
+
+      setHistory((h) => (model ? [...h, model] : h).slice(-40));
+      setReverseCode(clean);
+      setReverse(result);
+      setModel(result.model);
+      setPictureDataUrl(svgUrl);
+      setPictureFileName(`${result.model.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.svg`);
+      setPictureSampleId(undefined);
+      setPictureProvider('code-to-picture');
+      setPictureMeta({
+        width: Number.isFinite(widthVal) && widthVal > 0 ? widthVal : 480,
+        height: 320,
+        primaryColor,
+        backgroundColor,
+        fileName: `${result.model.label}.svg`,
+      });
+      setSelection(result.model.props[0]?.nodeId ?? result.model.workflow?.nodes[0]?.id ?? null);
+      if (!stayInPictureMode && mode !== 'reverse' && mode !== 'picture') {
+        setMode('reverse');
+      }
+      pushLog(
+        `Code → Picture & Workflow: "${result.model.label}" (${result.model.props.length} props, ${
+          result.model.workflow?.nodes.length ?? 4
+        } DAG stages connected).`,
+      );
+    },
+    [model, mode, pushLog],
+  );
+
+  // Reverse mode: code -> semantic model + visual + picture thumbnail + workflow, on debounce
   useEffect(() => {
     if (mode !== 'reverse') return;
     const timer = setTimeout(() => {
@@ -403,21 +560,172 @@ export default function App() {
         return;
       }
       const result = reverseFromCode(reverseCode);
+      const svgUrl = codeToPictureDataUrl(result.model);
       setReverse(result);
       setModel(result.model);
-      setSelection(null);
+      setPictureDataUrl(svgUrl);
+      setPictureFileName(`${result.model.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.svg`);
+      setPictureSampleId(undefined);
+      setSelection((prev) => prev ?? result.model.props[0]?.nodeId ?? null);
       pushLog(result.note);
-    }, 450);
+    }, 380);
     return () => clearTimeout(timer);
   }, [reverseCode, mode, pushLog]);
+
+  // Picture -> Code reverse handler (also detects if user pasted code into the hint box!)
+  const runPictureReverse = useCallback(
+    async (opts?: { dataUrl?: string; fileName?: string; sampleId?: string; hintText?: string }) => {
+      const activeHint = opts?.hintText ?? pictureHint;
+      // If user pasted code into the hint input box in Picture -> Code, convert that code into Picture & Workflow!
+      if (!opts?.dataUrl && !opts?.sampleId && looksLikeCode(activeHint)) {
+        applyCodeToPictureAndWorkflow(activeHint, true);
+        setPictureHint('');
+        return;
+      }
+
+      const activeDataUrl = opts?.dataUrl ?? pictureDataUrl;
+      if (!activeDataUrl) return;
+      const activeFileName = opts?.fileName ?? pictureFileName;
+      const activeSampleId = 'sampleId' in (opts || {}) ? opts?.sampleId : pictureSampleId;
+
+      setBusy(true);
+      try {
+        const res = await reverseFromImage({
+          imageBase64: activeDataUrl,
+          fileName: activeFileName,
+          sampleId: activeSampleId,
+          hint: activeHint,
+          target,
+          apiKey: vaultSecret?.apiKey,
+          endpoint: vaultSecret?.endpoint || engineConfig.endpoint,
+          model: vaultSecret?.model || engineConfig.model,
+          sessionId: backendSessionId || getServerSessionId() || undefined,
+        });
+        setHistory((h) => (model ? [...h, model] : h).slice(-40));
+        setModel(res.model);
+        setReverse(res);
+        setReverseCode(res.code);
+        setPictureMeta(res.meta);
+        setPictureProvider(res.provider);
+        setSelection(res.model.props[0]?.nodeId ?? null);
+        pushLog(res.note);
+        if (res.provider !== 'local-vision') {
+          setUsage(bumpUsage(500, JSON.stringify(res.model).length));
+          armAutoLock();
+        }
+      } catch (err) {
+        pushLog(`Picture reverse error: ${(err as Error).message}`);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [
+      pictureDataUrl,
+      pictureFileName,
+      pictureSampleId,
+      pictureHint,
+      target,
+      vaultSecret,
+      engineConfig,
+      backendSessionId,
+      model,
+      pushLog,
+      armAutoLock,
+      applyCodeToPictureAndWorkflow,
+    ],
+  );
+
+  // Auto-run initial sample picture when entering Picture -> Code mode if no picture has been reversed yet
+  useEffect(() => {
+    if (mode === 'picture' && !pictureMeta && pictureDataUrl) {
+      void runPictureReverse({
+        dataUrl: pictureDataUrl,
+        fileName: pictureFileName,
+        sampleId: pictureSampleId,
+      });
+    }
+  }, [mode, pictureMeta, pictureDataUrl, pictureFileName, pictureSampleId, runPictureReverse]);
+
+  const handleImageFile = useCallback(
+    (file: File) => {
+      if (!file.type.startsWith('image/')) {
+        pushLog('Please select a valid image file (PNG, JPG, WebP, SVG).');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const resultUrl = String(reader.result || '');
+        if (!resultUrl) return;
+        setPictureDataUrl(resultUrl);
+        setPictureFileName(file.name);
+        setPictureSampleId(undefined);
+        if (mode !== 'picture') setMode('picture');
+        void runPictureReverse({
+          dataUrl: resultUrl,
+          fileName: file.name,
+          sampleId: undefined,
+        });
+      };
+      reader.readAsDataURL(file);
+    },
+    [mode, pushLog, runPictureReverse],
+  );
+
+  const handleSelectSampleImage = (sample: SampleReverseImage) => {
+    setPictureDataUrl(sample.dataUrl);
+    setPictureFileName(`${sample.id}.svg`);
+    setPictureSampleId(sample.id);
+    void runPictureReverse({
+      dataUrl: sample.dataUrl,
+      fileName: `${sample.id}.svg`,
+      sampleId: sample.id,
+    });
+  };
+
+  // Global clipboard paste support for images AND code when in picture or reverse mode
+  useEffect(() => {
+    if (mode === 'cover') return;
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) {
+            e.preventDefault();
+            handleImageFile(file);
+            return;
+          }
+        }
+      }
+      // If user is in Picture mode and pastes code on the page (outside an input/textarea), reverse the code into Picture + Workflow
+      const activeTag = (document.activeElement as HTMLElement | null)?.tagName?.toLowerCase();
+      if (mode === 'picture' && activeTag !== 'input' && activeTag !== 'textarea') {
+        const text = e.clipboardData?.getData('text/plain') || '';
+        if (looksLikeCode(text)) {
+          e.preventDefault();
+          applyCodeToPictureAndWorkflow(text, true);
+        }
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [mode, handleImageFile, applyCodeToPictureAndWorkflow]);
 
   const generated = useMemo(() => (model ? generate(model, target) : null), [model, target]);
 
   const previewDoc = useMemo(() => {
-    if (mode === 'reverse' && reverse) {
-      return reverse.renderKind === 'html' || !model ? reverse.previewDoc : generatePreviewDoc(model);
+    if (!model) {
+      return mode === 'reverse' && reverse ? reverse.previewDoc : PLACEHOLDER_DOC;
     }
-    return model ? generatePreviewDoc(model) : PLACEHOLDER_DOC;
+    if (model.kind === 'ui/hero') {
+      return buildHeroPreviewDoc(model);
+    }
+    if (mode === 'reverse' && reverse && reverse.renderKind === 'html') {
+      return reverse.previewDoc;
+    }
+    return generatePreviewDoc(model);
   }, [mode, reverse, model]);
 
   const workflowGraph = useMemo(() => {
@@ -437,10 +745,15 @@ export default function App() {
     );
   }, [model, generated]);
 
-  const codeView =
-    mode === 'reverse' && reverse
-      ? { code: reverseCode, language: 'source', filename: 'pasted-code', lineMap: reverse.lineMap }
-      : generated;
+  const codeView = useMemo(() => {
+    if (mode === 'reverse' && reverse) {
+      if (!showReverseSource && generated) {
+        return generated;
+      }
+      return { code: reverseCode, language: 'source', filename: 'pasted-code', lineMap: reverse.lineMap };
+    }
+    return generated;
+  }, [mode, reverse, showReverseSource, generated, reverseCode]);
 
   const submitTranscript = () => {
     const text = transcript.trim();
@@ -554,12 +867,23 @@ export default function App() {
           <button type="button" className={mode === 'reverse' ? 'on' : ''} onClick={() => setMode('reverse')}>
             Code → Visual
           </button>
+          <button type="button" className={mode === 'picture' ? 'on' : ''} onClick={() => setMode('picture')}>
+            Picture → Code
+          </button>
         </div>
 
         {mode !== 'cover' ? (
           <label className="target-picker">
             <span>Target</span>
-            <select value={target} onChange={(e) => setTarget(e.target.value as TargetId)}>
+            <select
+              value={target}
+              onChange={(e) => {
+                setTarget(e.target.value as TargetId);
+                if (mode === 'reverse') {
+                  setShowReverseSource(false);
+                }
+              }}
+            >
               {TARGETS.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.label}
@@ -623,7 +947,28 @@ export default function App() {
           <section className="panel input-panel">
             <header className="panel-head">
               <h2>0 · Input</h2>
-              <span className="chip">{mode === 'speak' ? 'voice / text' : 'source code'}</span>
+              <span className="chip">
+                {mode === 'speak' ? 'voice / text' : mode === 'picture' ? 'picture → code' : 'source code'}
+              </span>
+
+              {mode === 'reverse' || mode === 'picture' ? (
+                <div className="view-toggle" style={{ marginLeft: 'auto' }} role="tablist" aria-label="Reverse input type">
+                  <button
+                    type="button"
+                    className={mode === 'reverse' ? 'on' : ''}
+                    onClick={() => setMode('reverse')}
+                  >
+                    📄 Code → Visual
+                  </button>
+                  <button
+                    type="button"
+                    className={mode === 'picture' ? 'on' : ''}
+                    onClick={() => setMode('picture')}
+                  >
+                    🖼️ Picture → Code
+                  </button>
+                </div>
+              ) : null}
             </header>
 
             {mode === 'speak' ? (
@@ -668,33 +1013,266 @@ export default function App() {
                   ))}
                 </div>
               </>
+            ) : mode === 'picture' ? (
+              <div className="picture-reverse-box">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleImageFile(f);
+                    e.target.value = '';
+                  }}
+                />
+
+                {/* Drag & Drop / Upload / Paste Zone */}
+                <div
+                  className={`picture-dropzone ${dragActive ? 'drag-active' : ''}`}
+                  onClick={() => fileInputRef.current?.click()}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDragActive(true);
+                  }}
+                  onDragLeave={() => setDragActive(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragActive(false);
+                    const f = e.dataTransfer.files?.[0];
+                    if (f) handleImageFile(f);
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      fileInputRef.current?.click();
+                    }
+                  }}
+                >
+                  <div className="picture-dropzone-icon">🖼️</div>
+                  <div className="picture-dropzone-text">
+                    <strong>Drop a picture here, click to browse, or press Ctrl+V to paste</strong>
+                    <span>
+                      Screenshots, UI mockups, workflow diagrams, or furniture blueprints — automatically reversed into
+                      semantic properties, production code &amp; a workflow DAG.
+                    </span>
+                  </div>
+                </div>
+
+                {/* Current Picture Inspector + Metadata */}
+                {pictureDataUrl ? (
+                  <div className="picture-inspector-card">
+                    <div className="picture-thumb-wrap">
+                      <img src={pictureDataUrl} alt={pictureFileName || 'Uploaded preview'} className="picture-thumb" />
+                    </div>
+                    <div className="picture-meta-col">
+                      <div className="picture-meta-header">
+                        <strong className="picture-filename">{pictureFileName || 'uploaded-image.png'}</strong>
+                        <span className="picture-provider-badge">
+                          {pictureProvider === 'gemini-vision'
+                            ? '✦ Gemini Vision'
+                            : pictureProvider === 'openai-vision'
+                            ? '✦ AI Vision'
+                            : pictureProvider === 'code-to-picture'
+                            ? '⚡ Code → Picture & DAG'
+                            : '⚡ Local Vision Compiler'}
+                        </span>
+                      </div>
+                      {pictureMeta ? (
+                        <div className="picture-swatches">
+                          <span className="picture-dim-pill">
+                            {pictureMeta.width} × {pictureMeta.height}px
+                          </span>
+                          <span className="picture-swatch" title="Sampled Primary Accent Color">
+                            <i style={{ background: pictureMeta.primaryColor }} />
+                            {pictureMeta.primaryColor}
+                          </span>
+                          <span className="picture-swatch" title="Sampled Surface Background Color">
+                            <i style={{ background: pictureMeta.backgroundColor }} />
+                            {pictureMeta.backgroundColor}
+                          </span>
+                        </div>
+                      ) : null}
+                      <div className="picture-hint-row">
+                        <input
+                          type="text"
+                          value={pictureHint}
+                          onChange={(e) => setPictureHint(e.target.value)}
+                          placeholder='Hint ("Pricing card", "DevOps pipeline") OR paste code here'
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              void runPictureReverse();
+                            }
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="primary"
+                          disabled={busy}
+                          onClick={() => void runPictureReverse()}
+                        >
+                          {busy ? 'Reversing…' : looksLikeCode(pictureHint) ? 'Code → Picture & DAG' : 'Reverse → Code'}
+                        </button>
+                      </div>
+                      {generated ? (
+                        <div className="picture-actions-row">
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => {
+                              setReverseCode(generated.code);
+                              setShowReverseSource(true);
+                              setMode('reverse');
+                              pushLog('Loaded reversed code into Code → Visual editor.');
+                            }}
+                          >
+                            Open Reversed Code in Editor →
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* Direct Code -> Picture & Workflow box inside Picture mode */}
+                <details className="engine-box code-to-pic-box">
+                  <summary>💻 Or paste code here to generate Picture &amp; Workflow DAG</summary>
+                  <div className="code-to-pic-body">
+                    <textarea
+                      className="code-input"
+                      rows={4}
+                      value={pictureCodeInput}
+                      onChange={(e) => setPictureCodeInput(e.target.value)}
+                      placeholder="Paste React TSX, HTML, Shell script, Workflow JSON, or Python here to synthesize its Picture & Workflow DAG..."
+                      spellCheck={false}
+                    />
+                    <div className="quick-row">
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={() => {
+                          if (pictureCodeInput.trim()) {
+                            applyCodeToPictureAndWorkflow(pictureCodeInput, true);
+                          }
+                        }}
+                      >
+                        ⚡ Render Code → Picture &amp; Workflow
+                      </button>
+                      <button
+                        type="button"
+                        className="chip-button"
+                        onClick={() => {
+                          const sampleShell = [
+                            '#!/usr/bin/env sh',
+                            '# [1] Trigger: On Git Push main',
+                            ': # webhook: push main',
+                            '# [2] Validator: Run Unit Tests & Lint',
+                            'npm test',
+                            '# [3] Transform: Build Production Bundle',
+                            'npm run build',
+                            '# [4] Action: Deploy to Production',
+                            'git push origin main',
+                          ].join('\n');
+                          setPictureCodeInput(sampleShell);
+                          applyCodeToPictureAndWorkflow(sampleShell, true);
+                        }}
+                      >
+                        Load Sample Pipeline Code
+                      </button>
+                    </div>
+                  </div>
+                </details>
+
+                {/* 1-Click Sample Pictures Gallery */}
+                <div className="picture-samples-section">
+                  <div className="picture-samples-label">Try a sample picture (1-click reverse to code + DAG):</div>
+                  <div className="picture-samples-grid">
+                    {SAMPLE_REVERSE_IMAGES.map((sample) => (
+                      <button
+                        key={sample.id}
+                        type="button"
+                        className={`picture-sample-card ${pictureSampleId === sample.id ? 'active' : ''}`}
+                        onClick={() => handleSelectSampleImage(sample)}
+                      >
+                        <img src={sample.dataUrl} alt={sample.title} className="picture-sample-img" />
+                        <div className="picture-sample-info">
+                          <strong>{sample.title}</strong>
+                          <span>{sample.subtitle}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             ) : (
               <>
                 <textarea
                   className="code-input"
                   value={reverseCode}
-                  placeholder={'Paste HTML, JSX, Python or TypeScript here.\nIt gets rendered and the dimensions inside it become editable nodes.'}
-                  onChange={(e) => setReverseCode(e.target.value)}
+                  placeholder={'Paste React TSX, HTML, Shell Pipeline, Workflow JSON, or Python here.\nIt renders into a live Picture + editable Semantic Nodes + connected Workflow DAG.'}
+                  onChange={(e) => {
+                    setReverseCode(e.target.value);
+                    setShowReverseSource(true);
+                  }}
                   spellCheck={false}
                 />
                 <div className="quick-row">
                   <button
                     type="button"
                     className="chip-button"
-                    onClick={() => setReverseCode(DEFAULT_HERO_CODE)}
+                    onClick={() => {
+                      setShowReverseSource(true);
+                      setReverseCode(DEFAULT_HERO_CODE);
+                    }}
                   >
                     Hero Component (TSX)
                   </button>
                   <button
                     type="button"
                     className="chip-button"
-                    onClick={() =>
+                    onClick={() => {
+                      setShowReverseSource(true);
                       setReverseCode(
                         ['class Table:', '    top_width = 48', '    leg_height = 29', '    top_thickness = 1.5', '    leg_count = 4'].join('\n'),
-                      )
-                    }
+                      );
+                    }}
                   >
                     Table Class (Python)
+                  </button>
+                  <button
+                    type="button"
+                    className="chip-button"
+                    onClick={() => {
+                      setShowReverseSource(true);
+                      setReverseCode(
+                        [
+                          '#!/usr/bin/env sh',
+                          '# [1] Trigger: On Git Push main',
+                          ': # webhook: push main',
+                          '# [2] Validator: Run Unit Tests & Lint',
+                          'npm test',
+                          '# [3] Transform: Build Production Bundle',
+                          'npm run build',
+                          '# [4] Action: Deploy to Production',
+                          'git push origin main',
+                        ].join('\n'),
+                      );
+                    }}
+                  >
+                    DevOps Pipeline (Shell)
+                  </button>
+                  <button
+                    type="button"
+                    className="chip-button"
+                    onClick={() => {
+                      applyCodeToPictureAndWorkflow(reverseCode, true);
+                      setMode('picture');
+                    }}
+                  >
+                    🖼️ Send Code → Picture View
                   </button>
                   <button
                     type="button"
@@ -853,6 +1431,16 @@ export default function App() {
               selection={selection}
               onSelect={setSelection}
               model={model}
+              onApplyCode={(newCode) => applyCodeToPictureAndWorkflow(newCode, mode === 'picture')}
+              viewToggle={
+                mode === 'reverse' && reverse && generated
+                  ? {
+                      showingSource: showReverseSource,
+                      targetLabel: target,
+                      onToggle: setShowReverseSource,
+                    }
+                  : undefined
+              }
             />
           ) : (
             <section className="panel">
@@ -869,6 +1457,9 @@ export default function App() {
             onSelect={setSelection}
             workflow={workflowGraph}
             showSafety={target === 'shell' || Boolean(model?.workflow)}
+            onUpdateWorkflowNode={handleUpdateWorkflowNode}
+            onAddWorkflowNode={handleAddWorkflowNode}
+            autoSwitchToWorkflow={target === 'workflow' || model?.kind === WORKFLOW_KIND}
           />
         </div>
       </main>

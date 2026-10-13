@@ -3,16 +3,21 @@ import { findProp, propNumber } from './types.ts';
 import { classifyCommand, worstLevel } from './safety.ts';
 import { ensureWorkflow, NODE_TYPE_LABEL, topoOrder } from './workflow.ts';
 
-/** Emits code lines while remembering which intent node each line came from. */
+/** Emits code lines while remembering which intent node(s) each line came from. */
 class CodeBuilder {
-  private lines: { text: string; node?: string }[] = [];
+  private lines: { text: string; nodes: string[] }[] = [];
 
-  push(text = '', node?: string): this {
-    this.lines.push({ text, node });
+  push(text = '', node?: string | (string | undefined)[]): this {
+    const nodes = Array.isArray(node)
+      ? node.filter((n): n is string => Boolean(n))
+      : node
+      ? [node]
+      : [];
+    this.lines.push({ text, nodes });
     return this;
   }
 
-  block(lines: [string, string?][]): this {
+  block(lines: [string, (string | (string | undefined)[])?][]): this {
     for (const [text, node] of lines) this.push(text, node);
     return this;
   }
@@ -20,15 +25,26 @@ class CodeBuilder {
   build(filename: string, language: string): GeneratedCode {
     const lineMap: Record<string, { start: number; end: number }[]> = {};
     this.lines.forEach((line, i) => {
-      if (!line.node) return;
+      if (line.nodes.length === 0) return;
       const n = i + 1;
-      const ranges = lineMap[line.node] ?? (lineMap[line.node] = []);
-      const last = ranges[ranges.length - 1];
-      if (last && last.end === n - 1) last.end = n;
-      else ranges.push({ start: n, end: n });
+      for (const nodeId of line.nodes) {
+        const ranges = lineMap[nodeId] ?? (lineMap[nodeId] = []);
+        const last = ranges[ranges.length - 1];
+        if (last && last.end === n - 1) last.end = n;
+        else ranges.push({ start: n, end: n });
+      }
     });
     return { filename, language, code: this.lines.map((l) => l.text).join('\n'), lineMap };
   }
+}
+
+function workflowStageIds(m: IntentModel, fileName: string) {
+  const wf = ensureWorkflow(m, fileName);
+  const triggerId = wf.nodes.find((n) => n.type === 'trigger')?.id ?? wf.nodes[0]?.id;
+  const validatorId = wf.nodes.find((n) => n.type === 'validator')?.id ?? wf.nodes[1]?.id;
+  const transformId = wf.nodes.find((n) => n.type === 'transform')?.id ?? wf.nodes[2]?.id;
+  const actionId = wf.nodes.find((n) => n.type === 'action')?.id ?? wf.nodes[wf.nodes.length - 1]?.id;
+  return { triggerId, validatorId, transformId, actionId };
 }
 
 const fmt = (n: number): string => String(Math.round(n * 100) / 100);
@@ -197,6 +213,188 @@ function pushBoxScene(b: CodeBuilder, m: IntentModel): void {
   b.push('    </div>');
 }
 
+function pushUiSurfaceScene(b: CodeBuilder, m: IntentModel): void {
+  const title = str(m, 'title', m.label || 'Component Title');
+  const subtitle = str(m, 'subtitle', 'Reverse-engineered semantic interface with live two-way binding.');
+  const badge = str(m, 'badge', str(m, 'eyebrow', 'REVERSED FROM PICTURE'));
+  const ctaLabel = str(m, 'ctaLabel', 'Get Started');
+  const price = str(m, 'price', '');
+  const primaryColor = str(m, 'primaryColor', '#38bdf8');
+  const bgColor = str(m, 'backgroundColor', '#0f172a');
+  const width = num(m, 'width', 520);
+  const radius = num(m, 'radius', 16);
+
+  const badgeKey = findProp(m, 'badge') ? 'badge' : findProp(m, 'eyebrow') ? 'eyebrow' : 'title';
+
+  b.push('    <div class="box-scene" style="background:radial-gradient(120% 120% at 50% 0%, #0f172a 0%, #020617 100%);color:#f8fafc;padding:32px;">');
+  b.push('      <div class="stage-label" style="color:#94a3b8;">visual verifier &middot; reversed UI surface (1280px desktop stage)</div>');
+  b.push(
+    `      <div ${nodeAttrs('width', `Container width ${fmt(width)}px`)} style="width:100%;max-width:${fmt(Math.max(320, width))}px;background:${escapeHtml(bgColor)};border:1px solid rgba(148,163,184,0.22);border-radius:${fmt(radius)}px;padding:36px;box-shadow:0 28px 60px rgba(0,0,0,0.55);display:flex;flex-direction:column;gap:18px;">`,
+    'width',
+  );
+  b.push(
+    `        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">`,
+  );
+  b.push(
+    `          <span ${nodeAttrs(badgeKey, `Badge: ${badge}`)} style="display:inline-flex;align-items:center;padding:5px 12px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;background:rgba(56,189,248,0.14);color:${escapeHtml(primaryColor)};border:1px solid ${escapeHtml(primaryColor)}44;">${escapeHtml(badge)}</span>`,
+    badgeKey,
+  );
+  b.push(
+    `          <span ${nodeAttrs('radius', `Corner radius ${fmt(radius)}px`)} style="font-size:11px;color:#64748b;font-family:monospace;">r=${fmt(radius)}px &middot; w=${fmt(width)}px</span>`,
+    'radius',
+  );
+  b.push('        </div>');
+  b.push(
+    `        <h1 ${nodeAttrs('title', `Title: ${title}`)} style="margin:0;font-size:32px;line-height:1.15;font-weight:800;letter-spacing:-0.02em;color:#f8fafc;">${escapeHtml(title)}</h1>`,
+    'title',
+  );
+  if (price) {
+    b.push(
+      `        <div ${nodeAttrs('price', `Price / Metric: ${price}`)} style="font-size:38px;font-weight:800;color:${escapeHtml(primaryColor)};letter-spacing:-0.03em;">${escapeHtml(price)}</div>`,
+      'price',
+    );
+  }
+  b.push(
+    `        <p ${nodeAttrs('subtitle', `Subtitle: ${subtitle}`)} style="margin:0;font-size:15px;line-height:1.6;color:#94a3b8;">${escapeHtml(subtitle)}</p>`,
+    'subtitle',
+  );
+  b.push(
+    `        <div style="display:flex;align-items:center;gap:12px;margin-top:8px;">`,
+  );
+  b.push(
+    `          <button ${nodeAttrs('ctaLabel', `CTA: ${ctaLabel}`)} style="padding:12px 24px;border-radius:${Math.max(6, Math.round(radius * 0.65))}px;background:${escapeHtml(primaryColor)};color:#041225;font-weight:700;font-size:14px;border:none;cursor:pointer;box-shadow:0 10px 24px ${escapeHtml(primaryColor)}40;">${escapeHtml(ctaLabel)}</button>`,
+    'ctaLabel',
+  );
+  b.push(
+    `          <span ${nodeAttrs('primaryColor', `Accent color ${primaryColor}`)} style="font-size:11.5px;color:#94a3b8;font-family:monospace;padding:6px 10px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);">Accent: ${escapeHtml(primaryColor)}</span>`,
+    'primaryColor',
+  );
+  b.push('        </div>');
+  b.push('      </div>');
+  b.push('      <div class="caption" style="color:#94a3b8;">Click any element (badge, heading, description, button, or container) to highlight its semantic node &amp; code lines.</div>');
+  b.push('    </div>');
+}
+
+function pushHeroScene(b: CodeBuilder, m: IntentModel): void {
+  const eyebrowVal = str(m, 'eyebrow', str(m, 'badge', 'Innovate Without Limits'));
+  const titleVal = str(m, 'title', m.label || 'Innovate Without Limits');
+  const subtitleVal = str(
+    m,
+    'subtitle',
+    'Transform ideas into code with semantic translation and visual verification.',
+  );
+  const ctaLabelVal = str(m, 'ctaLabel', 'Explore Now');
+  const ctaHrefVal = str(m, 'ctaHref', '#');
+  const gridHeight = num(m, 'grid.height', 600);
+  const accentHeight = num(m, 'accent.height', 500);
+  const paddingTop = num(m, 'padding.top', 112);
+  const eyebrowKey = findProp(m, 'eyebrow') ? 'eyebrow' : findProp(m, 'badge') ? 'badge' : 'title';
+
+  b.push(
+    `    <div class="scene" style="background:linear-gradient(to bottom,#000,#020617 35%,#1e293b 80%,#0f172a 100%);color:#fff;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:${fmt(paddingTop)}px 28px 64px;position:relative;overflow:hidden;" ${nodeAttrs('padding.top', `Top padding ${fmt(paddingTop)}px`)}>`,
+    'padding.top',
+  );
+  b.push('      <div class="stage-label" style="color:#94a3b8;z-index:20;">visual verifier &middot; interactive hero render (1280px desktop stage)</div>');
+  b.push(
+    `      <div ${nodeAttrs('grid.height', `Grid background height ${fmt(gridHeight)}px`)} style="position:absolute;inset:0;height:${fmt(gridHeight)}px;opacity:0.55;background-image:linear-gradient(to right,#334155 1px,transparent 1px),linear-gradient(to bottom,#334155 1px,transparent 1px);background-size:6rem 5rem;pointer-events:auto;"></div>`,
+    'grid.height',
+  );
+  b.push(
+    `      <div ${nodeAttrs('accent.height', `Radial accent height ${fmt(accentHeight)}px`)} style="position:absolute;left:50%;top:calc(100% - 140px);width:1100px;height:${fmt(accentHeight)}px;transform:translateX(-50%);border-radius:100%;border:1px solid rgba(180,140,222,0.4);background:radial-gradient(closest-side,#2e1065 30%,#000000 90%);pointer-events:auto;"></div>`,
+    'accent.height',
+  );
+  b.push(
+    `      <a href="${escapeHtml(ctaHrefVal)}" ${nodeAttrs(eyebrowKey, `Eyebrow: ${eyebrowVal}`)} style="position:relative;z-index:20;display:inline-flex;align-items:center;gap:8px;margin-bottom:18px;padding:8px 20px;border-radius:999px;border:2px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#d1d5db;font-size:13px;letter-spacing:0.06em;text-transform:uppercase;text-decoration:none;">${escapeHtml(eyebrowVal)} &rarr;</a>`,
+    eyebrowKey,
+  );
+  b.push(
+    `      <h1 ${nodeAttrs('title', `Title: ${titleVal}`)} style="position:relative;z-index:20;margin:0 0 18px;font-size:68px;font-weight:800;line-height:1.04;letter-spacing:-0.03em;max-width:960px;background:linear-gradient(135deg,#fff 45%,rgba(255,255,255,0.5));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">${escapeHtml(titleVal)}</h1>`,
+    'title',
+  );
+  b.push(
+    `      <p ${nodeAttrs('subtitle', `Subtitle: ${subtitleVal}`)} style="position:relative;z-index:20;margin:0 0 36px;font-size:20px;line-height:1.6;color:#94a3b8;max-width:680px;">${escapeHtml(subtitleVal)}</p>`,
+    'subtitle',
+  );
+  b.push(
+    `      <div style="position:relative;z-index:20;display:flex;justify-content:center;" ${nodeAttrs('ctaLabel', `CTA: ${ctaLabelVal}`)}>`,
+    'ctaLabel',
+  );
+  b.push(
+    `        <a href="${escapeHtml(ctaHrefVal)}" style="display:inline-flex;align-items:center;justify-content:center;border-radius:12px;background:#ffffff;color:#000000;font-weight:700;font-size:17px;padding:14px 32px;text-decoration:none;box-shadow:0 18px 38px rgba(0,0,0,0.45);">${escapeHtml(ctaLabelVal)}</a>`,
+    'ctaLabel',
+  );
+  b.push('      </div>');
+  b.push('      <div class="caption" style="color:#94a3b8;z-index:20;">Click any element (eyebrow, title, subtitle, CTA, or background) to highlight its semantic node &amp; code lines.</div>');
+  b.push('    </div>');
+}
+
+function pushWorkflowScene(b: CodeBuilder, m: IntentModel): void {
+  const graph = ensureWorkflow(m, `${slug(m.label)}.sh`);
+  const { order } = topoOrder(graph);
+  const typeColor: Record<string, string> = {
+    trigger: '#38bdf8',
+    validator: '#f59e0b',
+    transform: '#a78bfa',
+    action: '#34d399',
+  };
+
+  b.push(
+    '    <div class="box-scene" style="background:radial-gradient(120% 120% at 50% 0%, #0f172a 0%, #020617 100%);color:#f8fafc;padding:36px;flex-direction:column;gap:14px;overflow:auto;">',
+  );
+  b.push(
+    `      <div class="stage-label" style="color:#94a3b8;">visual verifier &middot; workflow pipeline (${escapeHtml(m.label)})</div>`,
+  );
+  b.push(
+    '      <div style="display:flex;flex-direction:column;align-items:center;gap:10px;width:100%;max-width:680px;z-index:10;">',
+  );
+
+  order.forEach((node, idx) => {
+    const color = typeColor[node.type] ?? '#38bdf8';
+    const safety = node.command ? classifyCommand(node.command).level : null;
+    const safetyDot =
+      safety === 'destructive' ? '#f87171' : safety === 'caution' ? '#f59e0b' : safety === 'safe' ? '#34d399' : null;
+    const sub = node.command ?? node.detail ?? '';
+
+    b.push(
+      `        <div ${nodeAttrs(node.id, `${NODE_TYPE_LABEL[node.type]}: ${node.label}`)} style="width:100%;background:#16223a;border:1.5px solid ${color}66;border-left:6px solid ${color};border-radius:12px;padding:14px 18px;display:flex;flex-direction:column;gap:6px;box-shadow:0 12px 28px rgba(0,0,0,0.4);">`,
+      node.id,
+    );
+    b.push('          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">', node.id);
+    b.push(
+      `            <span style="font-size:10.5px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:${color};">${escapeHtml(NODE_TYPE_LABEL[node.type])}${node.destination ? ` &rarr; ${escapeHtml(node.destination)}` : ''}</span>`,
+      node.id,
+    );
+    if (safetyDot) {
+      b.push(
+        `            <span style="display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:${safetyDot};font-weight:700;text-transform:uppercase;"><i style="width:8px;height:8px;border-radius:50%;background:${safetyDot};display:inline-block;"></i>${escapeHtml(safety!)}</span>`,
+        node.id,
+      );
+    }
+    b.push('          </div>', node.id);
+    b.push(
+      `          <div style="font-size:16px;font-weight:700;color:#f8fafc;">${escapeHtml(node.label)}</div>`,
+      node.id,
+    );
+    if (sub) {
+      b.push(
+        `          <code style="font-family:ui-monospace,monospace;font-size:12.5px;color:#93a4bd;background:rgba(10,17,32,0.65);padding:6px 10px;border-radius:7px;border:1px solid #26364f;">${escapeHtml(sub)}</code>`,
+        node.id,
+      );
+    }
+    b.push('        </div>', node.id);
+
+    if (idx < order.length - 1) {
+      b.push('        <div style="color:#38bdf8;font-size:18px;line-height:1;">&darr;</div>');
+    }
+  });
+
+  b.push('      </div>');
+  b.push(
+    '      <div class="caption" style="color:#94a3b8;">Click any workflow step card to highlight its semantic node, DAG step &amp; source code lines.</div>',
+  );
+  b.push('    </div>');
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }
@@ -205,156 +403,220 @@ function escapeHtml(value: string): string {
 
 function generateHtml(m: IntentModel): GeneratedCode {
   const b = new CodeBuilder();
-  b.push('<!doctype html>');
-  b.push('<html lang="en">');
-  b.push('<head>');
-  b.push('  <meta charset="utf-8" />');
-  b.push('  <meta name="viewport" content="width=device-width, initial-scale=1" />');
-  b.push(`  <title>${escapeHtml(m.label)} &middot; generated</title>`);
-  b.push('  <style>');
-  for (const line of SCENE_CSS.split('\n')) b.push(`  ${line}`);
-  b.push('  </style>');
-  b.push('</head>');
-  b.push('<body>');
-  if (m.kind === 'ui/button') pushButtonScene(b, m);
+  const fileName = `${slug(m.label)}.html`;
+  const { triggerId, validatorId, transformId, actionId } = workflowStageIds(m, fileName);
+  b.push('<!doctype html>', triggerId);
+  b.push('<html lang="en">', triggerId);
+  b.push('<head>', triggerId);
+  b.push('  <meta charset="utf-8" />', triggerId);
+  b.push('  <meta name="viewport" content="width=device-width, initial-scale=1" />', triggerId);
+  b.push(`  <title>${escapeHtml(m.label)} &middot; generated</title>`, transformId);
+  b.push('  <style>', validatorId);
+  for (const line of SCENE_CSS.split('\n')) b.push(`  ${line}`, validatorId);
+  b.push('  </style>', validatorId);
+  b.push('</head>', triggerId);
+  b.push('<body>', actionId);
+  if (m.kind === 'workflow/pipeline') pushWorkflowScene(b, m);
+  else if (m.kind === 'ui/hero') pushHeroScene(b, m);
+  else if (m.kind === 'ui/button') pushButtonScene(b, m);
   else if (m.kind === 'furniture/table' || m.kind === 'furniture/chair') pushTableScene(b, m);
+  else if (m.kind === 'ui/card' || m.kind === 'ui/dashboard' || m.kind === 'ui/form') pushUiSurfaceScene(b, m);
   else pushBoxScene(b, m);
-  b.push('</body>');
-  b.push('</html>');
-  return b.build(`${slug(m.label)}.html`, 'html');
+  b.push('</body>', actionId);
+  b.push('</html>', actionId);
+  return b.build(fileName, 'html');
 }
 
 function generateNextjs(m: IntentModel): GeneratedCode {
   const b = new CodeBuilder();
-  const iface = `${m.label.replace(/\s+/g, '')}Spec`;
-  b.push(`'use client';`);
+  const iface = `${m.label.replace(/[^a-zA-Z0-9]/g, '') || 'Component'}Spec`;
+  const compName = m.label.replace(/[^a-zA-Z0-9]/g, '') || 'ReversedComponent';
+  const fileName = `${compName}.tsx`;
+  const { triggerId, validatorId, transformId, actionId } = workflowStageIds(m, fileName);
+
+  b.push(`'use client';`, triggerId);
   b.push('');
-  b.push(`// Generated from the semantic model "${m.kind}".`);
-  b.push(`// Each property keeps its nodeId so the visual verifier can highlight its source.`);
+  b.push(`// Generated from the semantic model "${m.kind}".`, triggerId);
+  b.push(`// Each property keeps its nodeId so the visual verifier & workflow DAG highlight its source.`, triggerId);
   b.push('');
-  b.push(`export interface ${iface} {`);
+  b.push(`export interface ${iface} {`, transformId);
   for (const p of m.props) {
     const tsType = typeof p.value === 'number' ? 'number' : typeof p.value === 'boolean' ? 'boolean' : 'string';
     const opts = p.options ? ` // one of: ${p.options.join(' | ')}` : '';
-    b.push(`  /** ${p.label}${p.unit ? ` (${p.unit})` : ''} — nodeId: ${p.nodeId} */`, p.nodeId);
-    b.push(`  ${camel(p.key)}: ${tsType};${opts}`, p.nodeId);
+    b.push(`  /** ${p.label}${p.unit ? ` (${p.unit})` : ''} — nodeId: ${p.nodeId} */`, [p.nodeId, transformId]);
+    b.push(`  ${camel(p.key)}: ${tsType};${opts}`, [p.nodeId, transformId]);
   }
-  b.push('}');
+  b.push('}', transformId);
   b.push('');
-  b.push(`export const default${iface}: ${iface} = {`);
+  b.push(`export const default${iface}: ${iface} = {`, transformId);
   for (const p of m.props) {
     const literal = typeof p.value === 'number' ? fmt(p.value) : `'${String(p.value).replace(/'/g, "\\'")}'`;
-    b.push(`  ${camel(p.key)}: ${literal},`, p.nodeId);
+    b.push(`  ${camel(p.key)}: ${literal},`, [p.nodeId, transformId]);
   }
-  b.push('};');
+  b.push('};', transformId);
   b.push('');
-  b.push(`export function validate${m.label.replace(/\s+/g, '')}(spec: ${iface}): string[] {`);
-  b.push('  const warnings: string[] = [];');
+  b.push(`export function validate${compName}(spec: ${iface}): string[] {`, validatorId);
+  b.push('  const warnings: string[] = [];', validatorId);
   for (const w of m.warnings) {
-    b.push(`  // ${w.severity.toUpperCase()}: ${w.message.replace(/`/g, "'")}`);
-    b.push(`  warnings.push('${w.message.replace(/'/g, "\\'")}');`);
+    b.push(`  // ${w.severity.toUpperCase()}: ${w.message.replace(/`/g, "'")}`, [w.propKey, validatorId]);
+    b.push(`  warnings.push('${w.message.replace(/'/g, "\\'")}');`, [w.propKey, validatorId]);
   }
-  b.push('  return warnings;');
-  b.push('}');
+  b.push('  return warnings;', validatorId);
+  b.push('}', validatorId);
   b.push('');
-  b.push(`export default function ${m.label.replace(/\s+/g, '')}(spec: Partial<${iface}> = {}) {`);
-  b.push(`  const s = { ...default${iface}, ...spec };`);
-  b.push('  return (');
-  b.push(`    <section data-node-id="${m.props[0]?.nodeId ?? 'root'}" aria-label="${escapeHtml(m.label)}">`);
-  for (const p of m.props.slice(0, 4)) {
-    b.push(`      <span data-node-id="${p.nodeId}">{s.${camel(p.key)}}${p.unit ?? ''}</span>`, p.nodeId);
+  b.push(`export default function ${compName}(spec: Partial<${iface}> = {}) {`, actionId);
+  b.push(`  const s = { ...default${iface}, ...spec };`, actionId);
+  b.push('  return (', actionId);
+  b.push(
+    `    <section data-intent="${escapeHtml(m.kind)}" data-node-id="${m.props[0]?.nodeId ?? 'root'}" aria-label="${escapeHtml(m.label)}" className="p-8 rounded-2xl border border-slate-800 bg-slate-950 text-slate-100 shadow-2xl">`,
+    [m.props[0]?.nodeId, actionId],
+  );
+  for (const p of m.props) {
+    if (p.key === 'badge' || p.key === 'eyebrow') {
+      b.push(
+        `      <span data-node-id="${p.nodeId}" className="inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-sky-500/20 text-sky-400">{s.${camel(p.key)}}</span>`,
+        [p.nodeId, actionId],
+      );
+    } else if (p.key === 'title') {
+      b.push(`      <h2 data-node-id="${p.nodeId}" className="mt-3 text-3xl font-extrabold tracking-tight">{s.${camel(p.key)}}</h2>`, [
+        p.nodeId,
+        actionId,
+      ]);
+    } else if (p.key === 'price') {
+      b.push(`      <div data-node-id="${p.nodeId}" className="mt-2 text-4xl font-black text-sky-400">{s.${camel(p.key)}}</div>`, [
+        p.nodeId,
+        actionId,
+      ]);
+    } else if (p.key === 'subtitle') {
+      b.push(`      <p data-node-id="${p.nodeId}" className="mt-2 text-slate-400 leading-relaxed">{s.${camel(p.key)}}</p>`, [
+        p.nodeId,
+        actionId,
+      ]);
+    } else if (p.key === 'ctaLabel' || p.key === 'label') {
+      b.push(
+        `      <button type="button" data-node-id="${p.nodeId}" className="mt-4 px-6 py-3 rounded-xl bg-sky-400 text-slate-950 font-bold">{s.${camel(p.key)}}</button>`,
+        [p.nodeId, actionId],
+      );
+    } else {
+      b.push(`      <div data-node-id="${p.nodeId}" className="my-2">{s.${camel(p.key)}}${p.unit ?? ''}</div>`, [
+        p.nodeId,
+        actionId,
+      ]);
+    }
   }
-  b.push('    </section>');
-  b.push('  );');
-  b.push('}');
-  return b.build(`${m.label.replace(/\s+/g, '')}.tsx`, 'typescript');
+  b.push('    </section>', actionId);
+  b.push('  );', actionId);
+  b.push('}', actionId);
+  return b.build(fileName, 'typescript');
 }
 
 function generatePython(m: IntentModel): GeneratedCode {
   const b = new CodeBuilder();
   const cls = m.label.replace(/\s+/g, '');
-  b.push('"""Generated from the semantic model — run locally: python ' + slug(m.label) + '.py"""');
-  b.push('from dataclasses import dataclass, field');
-  b.push('from typing import List');
+  const fileName = `${slug(m.label)}.py`;
+  const { triggerId, validatorId, transformId, actionId } = workflowStageIds(m, fileName);
+
+  b.push('"""Generated from the semantic model — run locally: python ' + slug(m.label) + '.py"""', triggerId);
+  b.push('from dataclasses import dataclass, field', triggerId);
+  b.push('from typing import List', triggerId);
   b.push('');
   b.push('');
-  b.push('@dataclass');
-  b.push(`class ${cls}:`);
+  b.push('@dataclass', transformId);
+  b.push(`class ${cls}:`, transformId);
   for (const p of m.props) {
     const pyType = typeof p.value === 'number' ? 'float' : typeof p.value === 'boolean' ? 'bool' : 'str';
     const literal = typeof p.value === 'number' ? fmt(p.value) : `'${String(p.value).replace(/'/g, "\\'")}'`;
-    b.push(`    ${snake(p.key)}: ${pyType} = ${literal}  # ${p.label}${p.unit ? ` (${p.unit})` : ''} [nodeId=${p.nodeId}]`, p.nodeId);
+    b.push(
+      `    ${snake(p.key)}: ${pyType} = ${literal}  # ${p.label}${p.unit ? ` (${p.unit})` : ''} [nodeId=${p.nodeId}]`,
+      [p.nodeId, transformId],
+    );
   }
   b.push('');
-  b.push('    def validate(self) -> List[str]:');
-  b.push('        warnings: List[str] = []');
+  b.push('    def validate(self) -> List[str]:', validatorId);
+  b.push('        warnings: List[str] = []', validatorId);
   for (const w of m.warnings) {
-    b.push(`        # ${w.severity.toUpperCase()}: ${w.message.replace(/'/g, '')}`);
-    b.push(`        warnings.append('${w.message.replace(/'/g, '')}')`);
+    b.push(`        # ${w.severity.toUpperCase()}: ${w.message.replace(/'/g, '')}`, [w.propKey, validatorId]);
+    b.push(`        warnings.append('${w.message.replace(/'/g, '')}')`, [w.propKey, validatorId]);
   }
-  b.push('        return warnings');
+  b.push('        return warnings', validatorId);
   b.push('');
-  b.push('    def draw(self):');
-  b.push('        """Wireframe render — matplotlib, no external assets."""');
-  b.push('        import matplotlib.pyplot as plt');
-  b.push('        from mpl_toolkits.mplot3d.art3d import Poly3DCollection');
-  b.push('        fig = plt.figure()');
-  b.push('        ax = fig.add_subplot(111, projection="3d")');
+  b.push('    def draw(self):', actionId);
+  b.push('        """Wireframe render — matplotlib, no external assets."""', actionId);
+  b.push('        import matplotlib.pyplot as plt', actionId);
+  b.push('        from mpl_toolkits.mplot3d.art3d import Poly3DCollection', actionId);
+  b.push('        fig = plt.figure()', actionId);
+  b.push('        ax = fig.add_subplot(111, projection="3d")', actionId);
   if (m.kind === 'furniture/table' || m.kind === 'furniture/chair') {
-    b.push('        w, l, h, t = self.top_width, self.top_length, self.legs_height, self.top_thickness', 'top.width');
-    b.push('        top = [[0, 0, h], [w, 0, h], [w, l, h], [0, l, h]]', 'top.width');
-    b.push('        ax.add_collection3d(Poly3DCollection([top], alpha=0.6, facecolor="#d7b98c"))');
-    b.push('        for x, y in [(0, 0), (w, 0), (w, l), (0, l)]:');
-    b.push('            ax.plot([x, x], [y, y], [0, h], color="#8a5f33", linewidth=3)', 'legs.height');
-    b.push('        ax.set_xlim(0, max(w, 1)); ax.set_ylim(0, max(l, 1)); ax.set_zlim(0, max(h, 1) * 1.2)');
+    b.push('        w, l, h, t = self.top_width, self.top_length, self.legs_height, self.top_thickness', [
+      'top.width',
+      actionId,
+    ]);
+    b.push('        top = [[0, 0, h], [w, 0, h], [w, l, h], [0, l, h]]', ['top.width', actionId]);
+    b.push('        ax.add_collection3d(Poly3DCollection([top], alpha=0.6, facecolor="#d7b98c"))', actionId);
+    b.push('        for x, y in [(0, 0), (w, 0), (w, l), (0, l)]:', actionId);
+    b.push('            ax.plot([x, x], [y, y], [0, h], color="#8a5f33", linewidth=3)', ['legs.height', actionId]);
+    b.push('        ax.set_xlim(0, max(w, 1)); ax.set_ylim(0, max(l, 1)); ax.set_zlim(0, max(h, 1) * 1.2)', actionId);
   } else {
-    b.push('        ax.bar3d(0, 0, 0, self.width, self.depth, self.height, alpha=0.6)');
+    b.push('        ax.bar3d(0, 0, 0, self.width, self.depth, self.height, alpha=0.6)', actionId);
   }
-  b.push('        plt.show()');
+  b.push('        plt.show()', actionId);
   b.push('');
   b.push('');
-  b.push(`item = ${cls}()`);
-  b.push('for message in item.validate():');
-  b.push('    print("!", message)');
-  b.push('item.draw()');
-  return b.build(`${slug(m.label)}.py`, 'python');
+  b.push(`item = ${cls}()`, actionId);
+  b.push('for message in item.validate():', validatorId);
+  b.push('    print("!", message)', validatorId);
+  b.push('item.draw()', actionId);
+  return b.build(fileName, 'python');
 }
 
 function generateTypescript(m: IntentModel): GeneratedCode {
   const b = new CodeBuilder();
   const iface = `${m.label.replace(/\s+/g, '')}Spec`;
-  b.push(`// Semantic contract for "${m.kind}" — this is the layer humans and AI both read.`);
+  const fileName = `${slug(m.label)}.ts`;
+  const { triggerId, validatorId, transformId, actionId } = workflowStageIds(m, fileName);
+
+  b.push(`// Semantic contract for "${m.kind}" — this is the layer humans and AI both read.`, triggerId);
   b.push('');
-  b.push(`export interface ${iface} {`);
+  b.push(`export interface ${iface} {`, transformId);
   for (const p of m.props) {
     const tsType = typeof p.value === 'number' ? 'number' : typeof p.value === 'boolean' ? 'boolean' : 'string';
-    b.push(`  ${camel(p.key)}: ${tsType}; // ${p.label}${p.unit ? ` (${p.unit})` : ''} -> ${p.nodeId}`, p.nodeId);
+    b.push(`  ${camel(p.key)}: ${tsType}; // ${p.label}${p.unit ? ` (${p.unit})` : ''} -> ${p.nodeId}`, [
+      p.nodeId,
+      transformId,
+    ]);
   }
-  b.push('}');
+  b.push('}', transformId);
   b.push('');
-  b.push(`export const defaults: ${iface} = {`);
+  b.push(`export const defaults: ${iface} = {`, actionId);
   for (const p of m.props) {
     const literal = typeof p.value === 'number' ? fmt(p.value) : `'${String(p.value).replace(/'/g, "\\'")}'`;
-    b.push(`  ${camel(p.key)}: ${literal},`, p.nodeId);
+    b.push(`  ${camel(p.key)}: ${literal},`, [p.nodeId, actionId]);
   }
-  b.push('};');
+  b.push('};', actionId);
   b.push('');
-  b.push(`export const constraints = ${JSON.stringify(
-    m.warnings.map((w) => ({ id: w.id, severity: w.severity, prop: w.propKey, message: w.message })),
-    null,
-    2,
-  )} as const;`);
-  return b.build(`${slug(m.label)}.ts`, 'typescript');
+  b.push(
+    `export const constraints = ${JSON.stringify(
+      m.warnings.map((w) => ({ id: w.id, severity: w.severity, prop: w.propKey, message: w.message })),
+      null,
+      2,
+    )} as const;`,
+    validatorId,
+  );
+  return b.build(fileName, 'typescript');
 }
 
 function generateJson(m: IntentModel): GeneratedCode {
   const b = new CodeBuilder();
+  const fileName = `${slug(m.label)}.intent.json`;
+  const { triggerId, validatorId, transformId, actionId } = workflowStageIds(m, fileName);
   const json = JSON.stringify(m, null, 2);
   json.split('\n').forEach((line) => {
     const keyMatch = line.match(/"key": "([^"]+)"/);
-    b.push(line, keyMatch?.[1]);
+    const isWarn = /"warnings"|"severity"/.test(line);
+    const isWf = /"workflow"|"nodes"|"edges"/.test(line);
+    b.push(line, [keyMatch?.[1], isWarn ? validatorId : isWf ? actionId : transformId, triggerId]);
   });
-  return b.build(`${slug(m.label)}.intent.json`, 'json');
+  return b.build(fileName, 'json');
 }
 
 function generateShell(m: IntentModel): GeneratedCode {

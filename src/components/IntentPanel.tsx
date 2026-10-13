@@ -131,12 +131,38 @@ export default function IntentPanel({ model, selection, onSelect, onChange }: In
           <PropEditor
             key={prop.key}
             prop={prop}
-            selected={selection === prop.key}
+            selected={selection === prop.key || selection === prop.nodeId}
             onSelect={onSelect}
             onChange={onChange}
           />
         ))}
       </div>
+
+      {model.workflow &&
+      model.workflow.nodes.length > 0 &&
+      !model.workflow.nodes.every((n) => model.props.some((p) => p.nodeId === n.id)) ? (
+        <div className="warn-list">
+          <h3>Connected workflow DAG stages</h3>
+          <div className="intent-wf-list">
+            {model.workflow.nodes.map((node) => {
+              const active = selection === node.id;
+              return (
+                <button
+                  key={node.id}
+                  type="button"
+                  className={`intent-wf-chip ${active ? 'active' : ''}`}
+                  onClick={() => onSelect(active ? null : node.id)}
+                  title={`Select workflow stage ${node.id} to highlight its bound code lines`}
+                >
+                  <span className="intent-wf-type">{node.type}</span>
+                  <strong className="intent-wf-label">{node.label}</strong>
+                  <code className="intent-wf-id">{node.id}</code>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
 
       {model.warnings.length > 0 ? (
         <div className="warn-list">

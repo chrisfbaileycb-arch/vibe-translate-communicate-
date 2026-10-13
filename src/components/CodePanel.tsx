@@ -10,6 +10,12 @@ interface CodePanelProps {
   selection: string | null;
   onSelect: (key: string | null) => void;
   model?: IntentModel | null;
+  onApplyCode?: (code: string) => void;
+  viewToggle?: {
+    showingSource: boolean;
+    targetLabel: string;
+    onToggle: (showSource: boolean) => void;
+  };
 }
 
 export default function CodePanel({
@@ -20,18 +26,36 @@ export default function CodePanel({
   selection,
   onSelect,
   model,
+  onApplyCode,
+  viewToggle,
 }: CodePanelProps) {
   const [copied, setCopied] = useState(false);
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draftCode, setDraftCode] = useState(code);
+
+  useEffect(() => {
+    if (!editing) {
+      setDraftCode(code);
+    }
+  }, [code, editing]);
 
   const lines = useMemo(() => code.split('\n'), [code]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const nodeByLine = useMemo(() => {
     const map = new Map<number, string>();
-    for (const [node, ranges] of Object.entries(lineMap)) {
+    const entries = Object.entries(lineMap);
+    // Prioritize specific property/step nodes first, then broad stage.* / rev.* nodes as fallback
+    const sorted = [
+      ...entries.filter(([k]) => !/^(stage|rev)\./.test(k)),
+      ...entries.filter(([k]) => /^(stage|rev)\./.test(k)),
+    ];
+    for (const [node, ranges] of sorted) {
       for (const range of ranges) {
-        for (let n = range.start; n <= range.end; n += 1) if (!map.has(n)) map.set(n, node);
+        for (let n = range.start; n <= range.end; n += 1) {
+          if (!map.has(n)) map.set(n, node);
+        }
       }
     }
     return map;
@@ -48,6 +72,7 @@ export default function CodePanel({
 
   // Selecting a node elsewhere (canvas, render, semantic layer) brings its first line into view.
   useEffect(() => {
+    if (editing) return;
     const box = scrollRef.current;
     const hot = box?.querySelector<HTMLElement>('.code-hot');
     if (!box || !hot) return;
@@ -55,7 +80,7 @@ export default function CodePanel({
     if (top < 0 || top > box.clientHeight - hot.offsetHeight) {
       box.scrollTo({ top: box.scrollTop + top - box.clientHeight / 3, behavior: 'smooth' });
     }
-  }, [highlighted]);
+  }, [highlighted, editing]);
 
   const copy = async () => {
     try {
@@ -124,63 +149,130 @@ export default function CodePanel({
         <span className="chip">
           {filename} · {language}
         </span>
-        <div className="panel-actions">
-          <button type="button" className="ghost" onClick={copy} title="Copy code to clipboard">
-            {copied ? 'Copied!' : 'Copy'}
-          </button>
-          <button type="button" className="ghost" onClick={downloadCurrent} title={`Download ${filename}`}>
-            Download
-          </button>
 
-          <div className="download-group" title="Quick download in specific format">
+        {viewToggle ? (
+          <div className="view-toggle" role="tablist" aria-label="Code panel source or target">
             <button
               type="button"
-              className="download-pill"
-              onClick={() => downloadSpecificFormat('tsx')}
-              title="Download as React / Next.js (.tsx)"
+              role="tab"
+              aria-selected={viewToggle.showingSource}
+              className={viewToggle.showingSource ? 'on' : ''}
+              onClick={() => viewToggle.onToggle(true)}
             >
-              .tsx
+              Pasted Source
             </button>
             <button
               type="button"
-              className="download-pill"
-              onClick={() => downloadSpecificFormat('py')}
-              title="Download as Python (.py)"
+              role="tab"
+              aria-selected={!viewToggle.showingSource}
+              className={!viewToggle.showingSource ? 'on' : ''}
+              onClick={() => viewToggle.onToggle(false)}
             >
-              .py
-            </button>
-            <button
-              type="button"
-              className="download-pill"
-              onClick={() => downloadSpecificFormat('html')}
-              title="Download as HTML (.html)"
-            >
-              .html
+              Target ({viewToggle.targetLabel})
             </button>
           </div>
+        ) : null}
+
+        <div className="panel-actions">
+          {onApplyCode ? (
+            <button
+              type="button"
+              className={editing ? 'primary' : 'ghost'}
+              onClick={() => {
+                if (editing) {
+                  onApplyCode(draftCode);
+                  setEditing(false);
+                } else {
+                  setDraftCode(code);
+                  setEditing(true);
+                }
+              }}
+              title={
+                editing
+                  ? 'Reverse this code into Semantic Model, Picture Preview & Workflow DAG'
+                  : 'Edit or paste code directly to update Picture & Workflow'
+              }
+            >
+              {editing ? '⚡ Apply Code → Picture & Workflow' : '✏️ Paste / Edit Code'}
+            </button>
+          ) : null}
+          {editing ? (
+            <button type="button" className="ghost" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+          ) : null}
+          {!editing ? (
+            <>
+              <button type="button" className="ghost" onClick={copy} title="Copy code to clipboard">
+                {copied ? 'Copied!' : 'Copy'}
+              </button>
+              <button type="button" className="ghost" onClick={downloadCurrent} title={`Download ${filename}`}>
+                Download
+              </button>
+
+              <div className="download-group" title="Quick download in specific format">
+                <button
+                  type="button"
+                  className="download-pill"
+                  onClick={() => downloadSpecificFormat('tsx')}
+                  title="Download as React / Next.js (.tsx)"
+                >
+                  .tsx
+                </button>
+                <button
+                  type="button"
+                  className="download-pill"
+                  onClick={() => downloadSpecificFormat('py')}
+                  title="Download as Python (.py)"
+                >
+                  .py
+                </button>
+                <button
+                  type="button"
+                  className="download-pill"
+                  onClick={() => downloadSpecificFormat('html')}
+                  title="Download as HTML (.html)"
+                >
+                  .html
+                </button>
+              </div>
+            </>
+          ) : null}
         </div>
       </header>
 
       {downloadNotice ? <div className="vault-notice">{downloadNotice}</div> : null}
 
-      <div className="code-scroll" ref={scrollRef}>
-        {lines.map((line, i) => {
-          const n = i + 1;
-          const node = nodeByLine.get(n);
-          const isHot = highlighted.has(n);
-          return (
-            <div
-              key={n}
-              className={`code-line ${isHot ? 'code-hot' : ''} ${node ? 'code-mapped' : ''}`}
-              onClick={() => onSelect(node ?? null)}
-              title={node ? `node: ${node}` : undefined}
-            >
-              <span className="code-num">{n}</span>
-              <span className="code-text">{line || ' '}</span>
-            </div>
-          );
-        })}
-      </div>
+      {editing ? (
+        <div className="code-editor-inline">
+          <textarea
+            className="code-input code-inline-textarea"
+            value={draftCode}
+            onChange={(e) => setDraftCode(e.target.value)}
+            spellCheck={false}
+            placeholder="Paste or edit React TSX, HTML, Shell script, Workflow JSON, or Python here, then click '⚡ Apply Code → Picture & Workflow'..."
+          />
+        </div>
+      ) : (
+        <div className="code-scroll" ref={scrollRef}>
+          {lines.map((line, i) => {
+            const n = i + 1;
+            const node = nodeByLine.get(n);
+            const isHot = highlighted.has(n);
+            return (
+              <div
+                key={n}
+                className={`code-line ${isHot ? 'code-hot' : ''} ${node ? 'code-mapped' : ''}`}
+                onClick={() => onSelect(node ?? null)}
+                title={node ? `node: ${node}` : undefined}
+              >
+                <span className="code-num">{n}</span>
+                <span className="code-text">{line || ' '}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }

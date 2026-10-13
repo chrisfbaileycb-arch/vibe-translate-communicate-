@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 interface CoverLandingProps {
   heroCode: string;
-  onLaunch: (initialMode?: 'speak' | 'reverse') => void;
+  onLaunch: (initialMode?: 'speak' | 'reverse' | 'picture') => void;
   onLoadHeroIntoReverse: () => void;
 }
 
@@ -56,8 +56,8 @@ export default function CoverLanding({ heroCode, onLaunch, onLoadHeroIntoReverse
 
           {/* Subtitle */}
           <p className="cover-subtitle">
-            Speak an idea, see the semantic model, get production code, and verify it visually — with two-way binding
-            between the render and the source.
+            Speak an idea, drop a picture, or paste source code — see the semantic model, get production code, and verify
+            it visually with two-way binding.
           </p>
 
           {/* Primary Action Buttons */}
@@ -67,6 +67,9 @@ export default function CoverLanding({ heroCode, onLaunch, onLoadHeroIntoReverse
               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5">
                 <path d="M5 12h14M12 5l7 7-7 7" />
               </svg>
+            </button>
+            <button type="button" className="cover-ghost-btn" onClick={() => onLaunch('picture')}>
+              🖼️ Picture → Code (Reverse Flow)
             </button>
             <button type="button" className="cover-ghost-btn" onClick={onLoadHeroIntoReverse}>
               Open in Code → Visual Mode

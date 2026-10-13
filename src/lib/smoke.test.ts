@@ -5,7 +5,13 @@
 import { parseUtterance, parseCorrection } from './parse.ts';
 import { lint } from './lint.ts';
 import { generate, generatePreviewDoc, exportModelAsJson } from './generate.ts';
-import { reverseFromCode } from './reverse.ts';
+import {
+  codeToPictureDataUrl,
+  looksLikeCode,
+  reverseFromCode,
+  reverseFromImageLocal,
+  SAMPLE_REVERSE_IMAGES,
+} from './reverse.ts';
 import type { TargetId } from './types.ts';
 import { classifyCommand } from './safety.ts';
 import { appendWorkflowStep, buildWorkflowModel, ensureWorkflow, layoutGraph, looksLikeWorkflow, normalizeGraph } from './workflow.ts';
@@ -193,4 +199,47 @@ ok(classifyCommand('git commit -m wip').level === 'caution', 'git commit is yell
 ok(classifyCommand('kill -9 1234').level === 'destructive', 'kill -9 is red');
 ok(classifyCommand('psql -c "TRUNCATE logs"').level === 'destructive', 'truncate is red');
 
+// 14. picture -> code reverse flow
+ok(SAMPLE_REVERSE_IMAGES.length === 4, 'sample reverse pictures are available');
+const revCard = reverseFromImageLocal(
+  { width: 480, height: 320, primaryColor: '#38bdf8', backgroundColor: '#0f172a', sampleId: 'pricing-card' },
+  '',
+  'nextjs',
+);
+ok(revCard.model.kind === 'ui/card' && revCard.code.includes('ProPricingCard'), 'pricing card picture reverses to TSX code');
+ok(Boolean(revCard.model.workflow?.nodes.length), 'reversed picture includes reverse workflow DAG');
+const revPipe = reverseFromImageLocal(
+  { width: 480, height: 320, primaryColor: '#38bdf8', backgroundColor: '#09101d', sampleId: 'cicd-pipeline' },
+  '',
+  'shell',
+);
+ok(revPipe.model.workflow?.nodes.length === 4 && revPipe.code.includes('#!/usr/bin/env sh'), 'pipeline diagram picture reverses to shell workflow');
+
+// 15. code -> picture & workflow round-trip verification
+const roundTripCard = reverseFromCode(revCard.code);
+ok(
+  roundTripCard.model.kind === 'ui/card' &&
+    roundTripCard.model.props.find((p) => p.key === 'price')?.value === '$29/mo',
+  'generated TSX card round-trips through reverseFromCode with intact props',
+);
+ok(
+  Boolean(roundTripCard.model.workflow?.nodes.length) &&
+    roundTripCard.model.workflow!.nodes.every((n) => (roundTripCard.lineMap[n.id]?.length ?? 0) > 0),
+  'every workflow node in reversed TSX is bound to code lines in lineMap',
+);
+const roundTripShell = reverseFromCode(revPipe.code);
+ok(
+  roundTripShell.model.kind === 'workflow/pipeline' &&
+    roundTripShell.model.workflow?.nodes.length === 4 &&
+    (roundTripShell.lineMap['step.2']?.length ?? 0) > 0,
+  'shell pipeline script reverses to workflow/pipeline model + DAG with lineMap bindings',
+);
+ok(
+  codeToPictureDataUrl(roundTripCard.model).startsWith('data:image/svg+xml;utf8,') &&
+    looksLikeCode(revCard.code),
+  'codeToPictureDataUrl synthesizes valid SVG picture from reversed code',
+);
+
 console.log(`\n${passed} checks passed${runtime.process?.exitCode ? ' — WITH FAILURES' : ''}`);
+
+
