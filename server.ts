@@ -1,5 +1,4 @@
-import express, { Request, Response } from 'express';
-import { createServer as createViteServer } from 'vite';
+import express, { type Request, type Response } from 'express';
 import { GoogleGenAI } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -512,6 +511,7 @@ app.post('/api/reverse-image', async (req: Request, res: Response) => {
 
 async function startServer() {
   if (!isProduction) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -519,7 +519,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
+    app.use((_req: Request, res: Response) => {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }
